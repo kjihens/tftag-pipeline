@@ -2,6 +2,7 @@
 End-to-end orchestrator.
 """
 from __future__ import annotations
+from email.mime import base
 import os, uuid
 import numpy as np
 import pandas as pd
@@ -140,8 +141,17 @@ def run_pipeline(
 
     # Write outputs
     tio.to_sqlite(candidates, output_db_path, output_table, if_exists="append", index=False, create_indices=False)
-    parquet_path = os.path.splitext(output_db_path)[0] + f".{run_id}.parquet"
-    os.makedirs(os.path.dirname(parquet_path) or ".", exist_ok=True)
-    candidates.to_parquet(parquet_path, index=False)
+    
+    base = os.path.splitext(output_db_path)[0]
+    parquet_path = base + ".parquet"
+    csv_path = base + ".csv"
 
-    print(f"Finished. Wrote {len(candidates)} guides to {output_db_path} and {parquet_path}. run_id={run_id}")
+    os.makedirs(os.path.dirname(parquet_path) or ".", exist_ok=True)
+
+    candidates.to_parquet(parquet_path, index=False)
+    candidates.to_csv(csv_path, index=False)
+
+    print(f"Finished. Wrote {len(candidates)} guides to:")
+    print(f"   - {output_db_path}")
+    print(f"   - {parquet_path}")
+    print(f"   - {csv_path}")
