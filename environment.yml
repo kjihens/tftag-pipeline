@@ -1,0 +1,15 @@
+name: tftag
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pandas
+  - numpy
+  - biopython
+  - gffutils
+  - tqdm
+  - primer3-py
+  - sqlite
+  - pip
+  - pip:
+      - rs3
