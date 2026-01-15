@@ -234,7 +234,8 @@ def prefilter_designable(
     def in_bounds(s: int, e: int, clen: int) -> bool:
         return (s >= 1) and (e <= clen) and (e >= s)
 
-    for idx, row in iterator:
+    for row in iterator:
+        idx = row.Index
         chrom = row.chromosome
         feature = row.feature
         strand = row.gene_strand
@@ -316,7 +317,8 @@ def add_homology_arms(
 
     contig_len_cache: dict[str, int] = {}
 
-    for idx, row in iterator:
+    for row in iterator:
+        idx = row.Index
         chrom = row.chromosome
         feature = row.feature
         strand = row.gene_strand
@@ -392,7 +394,8 @@ def choose_arm_for_mutation(
     if show_progress:
         iterator = tqdm(iterator, total=len(work), desc="Choosing edit arm", leave=False)
 
-    for idx, row in iterator:
+    for row in iterator:
+        idx = row.Index
         if pd.isna(getattr(row, "HALs", np.nan)) or pd.isna(getattr(row, "HARs", np.nan)):
             work.at[idx, "requires_edit_arm"] = "none"
             continue
@@ -495,7 +498,8 @@ def apply_silent_edits(
     if show_progress:
         iterator = tqdm(iterator, total=len(work), desc="Applying silent edits", leave=False)
 
-    for idx, row in iterator:
+    for row in iterator:
+        idx = row.Index
         rowd = row._asdict()
         chrom = rowd["chromosome"]
         gene_strand = rowd["gene_strand"]
