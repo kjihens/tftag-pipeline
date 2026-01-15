@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tftag"
+version = "0.1.0"
+description = "CRISPR gRNA and homology-arm design pipeline for N/C-terminal tagging"
+authors = [{name="Korneel Hens"}]
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+
+dependencies = [
+  "pandas",
+  "numpy",
+  "biopython",
+  "gffutils",
+  "primer3-py",
+  "tqdm",
+  "pyarrow"
+]
+
+[project.scripts]
+tftag = "tftag.cli:main"
