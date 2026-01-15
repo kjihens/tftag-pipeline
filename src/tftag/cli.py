@@ -3,7 +3,7 @@ CLI for TFTag pipeline.
 """
 from __future__ import annotations
 import argparse
-from pipeline import run_pipeline
+from .pipeline import run_pipeline
 
 
 def main():
