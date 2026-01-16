@@ -10,7 +10,7 @@ _STRAND_MM_RE = re.compile(r"([+-])\s*([0-9]+)\s*$")
 def write_cas_offinder_input(
     guides: pd.DataFrame,
     genome_fasta_path: str,
-    pam_pattern: str = "NNNNNNNNNNNNNNNNNNNN",  # 20N (protospacer only)
+    pam_pattern: str = "NNNNNNNNNNNNNNNNNNNNNGG",  # 20N (protospacer only)
     outfile: str = "cas_offinder_input.txt",
     mismatches: int = 4,
     seq_col: str = "spacer",
@@ -24,39 +24,31 @@ def write_cas_offinder_input(
     """
     os.makedirs(os.path.dirname(outfile) or ".", exist_ok=True)
 
-    pattern = str(pam_pattern).strip().upper()
-    patt_len = len(pattern)
-    if patt_len == 0:
-        raise ValueError("pam_pattern is empty.")
+    # Build 23-mers: spacer + PAM (requires pam_seq to be present and 3nt)
+    if "pam_seq" in guides.columns:
+        seqs23 = (
+            guides["spacer"].astype(str).str.upper()
+            + guides["pam_seq"].astype(str).str.upper()
+        )
+    elif "grna_seq_23" in guides.columns:
+        seqs23 = guides["grna_seq_23"].astype(str).str.upper()
+    else:
+        raise KeyError("Need either ('spacer' + 'pam_seq') or 'grna_seq_23' to build 23-nt Cas-OFFinder queries.")
 
-    if seq_col not in guides.columns:
-        raise KeyError(f"Column '{seq_col}' not found in guides DataFrame.")
+    seqs23 = seqs23.dropna()
+    seqs23 = seqs23[seqs23.str.len() == len(pam_pattern)]  # enforce same length
 
-    seqs = (
-        guides[seq_col]
-        .dropna()
-        .astype(str)
-        .str.upper()
-        .str.replace(r"\s+", "", regex=True)
-        .unique()
-        .tolist()
-    )
-    seqs = sorted(seqs)
-
-    # Validate sequence lengths
-    bad = [s for s in seqs if len(s) != patt_len]
-    if bad:
-        examples = ", ".join(bad[:5])
+    if seqs23.empty:
         raise ValueError(
-            f"Cas-OFFinder input error: {len(bad)} sequences in '{seq_col}' do not match "
-            f"pattern length {patt_len}. Examples: {examples}"
+            f"No valid query sequences of length {len(pam_pattern)} were produced. "
+            f"Check spacer/pam_seq columns and pattern."
         )
 
     with open(outfile, "w") as f:
         f.write(genome_fasta_path + "\n")
-        f.write(pattern + "\n")
-        for seq in seqs:
-            f.write(f"{seq} {int(mismatches)}\n")
+        f.write(pam_pattern + "\n")
+        for seq in sorted(set(seqs23)):
+            f.write(f"{seq} {mismatches}\n")
 
     return outfile
 

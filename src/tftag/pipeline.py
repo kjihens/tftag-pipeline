@@ -12,13 +12,8 @@ from . import annotate, scan, efficiency, design
 from .genome_io import create_GTF_db, load_fasta_dict
 from .storage import to_sqlite
 from .select import select_one_per_tag
-from .helpers import parse_genes_arg
-from .off_targeting import (
-    enumerate_offtargets_cas_offinder,
-    merge_specificity,
-    filter_no_offtargets
-)
-
+from .helpers import parse_genes_arg, filter_by_offtarget_mismatch
+from .off_targeting import enumerate_offtargets_cas_offinder, merge_specificity
 
 
 def run_pipeline(
@@ -38,8 +33,10 @@ def run_pipeline(
     cas_offinder_bin: str = "cas-offinder",
     device_spec: str = "C",
     mismatches: int = 4,
-    pam_pattern: str = "NNNNNNNNNNNNNNNNNNNN",
-    no_offtarget_sites: bool = False,
+    # For SpCas9 NGG: 20N + GG (Cas-OFFinder uses pattern line length to define target length)
+    pam_pattern: str = "NNNNNNNNNNNNNNNNNNNNNGG",
+    # Filtering: 0/None = no filter; 2 => require n_mm0==1 and n_mm1==0; -1 => strict uniqueness
+    min_offtarget_mismatch: int | None = 0,
     # Selection / outputs
     per_tag: str = "all",  # all|closest|rs3
     write_csv: bool = True,
@@ -48,18 +45,21 @@ def run_pipeline(
     """
     Run the TFTag pipeline.
 
-    Parameters of note
-    ------------------
     per_tag:
       - "all": keep all candidate guides for each (gene_id, tag)
-      - "closest": keep one guide per (gene_id, tag) with smallest cut_distance (tie-breaker: higher rs3, fewer hits)
-      - "rs3": keep one guide per (gene_id, tag) with highest rs3_score (tie-breaker: closer, fewer hits)
+      - "closest": keep one guide per (gene_id, tag) with smallest cut_distance
+      - "rs3": keep one guide per (gene_id, tag) with highest rs3_score
 
-    no_offtarget_sites:
-      Retain only guides with mm0 == 1 and mm1..mmN == 0 (requires run_offtargets=True).
+    min_offtarget_mismatch:
+      - None or 0: no off-target filtering
+      - 2: keep only guides with n_mm0 == 1 and n_mm1 == 0
+      - 3: additionally require n_mm2 == 0
+      - -1: strict uniqueness (only mm0==1, all other n_mm* == 0)
     """
     if per_tag not in ("all", "closest", "rs3"):
         raise ValueError("per_tag must be one of: all, closest, rs3")
+    if mismatches < 0:
+        raise ValueError("mismatches must be >= 0")
 
     # Ensure output directory exists
     os.makedirs(os.path.dirname(output_db_path) or ".", exist_ok=True)
@@ -102,7 +102,7 @@ def run_pipeline(
 
     # Off-target enumeration (Cas-OFFinder)
     if run_offtargets:
-        hits, spec = enumerate_offtargets_cas_offinder(
+        _hits, spec = enumerate_offtargets_cas_offinder(
             candidates,
             genome_fasta_path,
             out_dir="out",
@@ -113,25 +113,28 @@ def run_pipeline(
             pam_pattern=pam_pattern,
         )
         candidates = merge_specificity(candidates, spec, mismatches=mismatches)
+
+        # Apply mismatch-based filter (if requested)
+        if min_offtarget_mismatch is not None and int(min_offtarget_mismatch) != 0:
+            candidates = filter_by_offtarget_mismatch(candidates, min_offtarget_mismatch)
+            if candidates.empty:
+                print("No guides remain after applying --min-offtarget-mismatch filter.")
+                return
+
     else:
+        # Populate expected columns so downstream code and selection can run
         candidates["n_hits"] = np.nan
         for k in range(0, mismatches + 1):
             candidates[f"n_mm{k}"] = np.nan
 
-    # Filter to guides with no detectable off-targets (if requested)
-    if no_offtarget_sites:
-        if not run_offtargets:
-            print("Warning: --no-offtarget-sites requested but off-target enumeration is disabled. Returning no results.")
-            return
-        candidates = filter_no_offtargets(candidates, mismatches=mismatches)
-        if candidates.empty:
-            print("No guides remain after applying --no-offtarget-sites filter.")
+        # If user requested an off-target filter but we didn't compute off-targets, stop early
+        if min_offtarget_mismatch is not None and int(min_offtarget_mismatch) != 0:
+            print("Error: --min-offtarget-mismatch requires --run-offtargets (Cas-OFFinder).")
             return
 
-    # Homology arms
+    # Design steps
     candidates = design.add_homology_arms(candidates, fasta_dict, show_progress=True)
 
-    # Decide which arm to mutate
     candidates = design.choose_arm_for_mutation(
         candidates,
         protospacer_overlap_len=protospacer_overlap_len,
@@ -139,10 +142,8 @@ def run_pipeline(
         show_progress=True,
     )
 
-    # Apply silent edits
     candidates = design.apply_silent_edits(candidates, show_progress=True)
 
-    # Validation primers
     candidates = design.validation_primers(candidates, fasta_dict, show_progress=True)
 
     # Reduce to one guide per (gene_id, tag) if requested

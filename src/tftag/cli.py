@@ -36,7 +36,7 @@ def main():
     ap.add_argument("--device", default="C")
     ap.add_argument("--mismatches", type=int, default=4)
     ap.add_argument("--pam-pattern", default="NNNNNNNNNNNNNNNNNNNN")
-    ap.add_argument("--no-offtarget-sites", action="store_true", help="Keep only guides with no off-target hits (mm1..mmN == 0 and mm0==1)")
+    ap.add_argument("--min-offtarget-mismatch", type=int, default=0, help="Minimum mismatch count allowed for off-target sites (e.g. 2 = allow ≥2 mismatches only).")
 
     # Selection
     ap.add_argument("--per-tag", choices=["all", "closest", "rs3"], default="all", help="Return all guides, or select one guide per gene per terminus (start/stop)")
@@ -59,7 +59,7 @@ def main():
         device_spec=args.device,
         mismatches=args.mismatches,
         pam_pattern=args.pam_pattern,
-        no_offtarget_sites=args.no_offtarget_sites,
+        min_offtarget_mismatch=args.min_offtarget_mismatch,
         per_tag=args.per_tag,
         protospacer_overlap_len=args.protospacer_overlap_len,
     )

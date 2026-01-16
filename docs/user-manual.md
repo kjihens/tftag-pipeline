@@ -32,9 +32,8 @@ TFTag automates the full design workflow required for endogenous tagging:
 - Silent-edit design to prevent re-cutting
 - On-target efficiency scoring (RS3)
 - Off-target enumeration (Cas-OFFinder)
-- Off-target risk scoring (CCLMoff)
 - Validation primer design
-- Persistent storage in SQLite + Parquet formats
+- Storage in SQLite, Parquet and csv formats
 
 The output is intended to serve both as:
 - a **design table** for experimental use, and
@@ -63,14 +62,14 @@ The output is intended to serve both as:
 ### 3.1 Clone the repository
 
 ```bash
-git clone https://github.com/YOURNAME/tftag-pipeline.git
+git clone https://github.com/kjihens/tftag-pipeline.git
 cd tftag-pipeline
 ```
 
-### 3.2 Create an environment (recommended)
+### 3.2 Create Conda environment
 
 ```bash
-conda create -n tftag python=3.10
+conda env create -f environment.yml
 conda activate tftag
 ```
 
@@ -113,6 +112,27 @@ Examples:
 --genes "FBgn0000008,FBgn0000017"
 Gene identifiers must match those in the annotation database.
 ```
+
+### 4.4 Selection Modes
+
+Optional. If omitted, **all guides** that were identified will be included.
+
+1. Closest to codon: Chooses the guide cutting nearest to the start/stop codon.
+```bash
+--select-mode closest
+```
+
+2. Highest RS3 score: Chooses the guide with the best predicted efficiency.
+```bash
+--select-mode rs3
+```
+
+3. Show all: Default
+```bash
+--select-mode all
+```
+
+### 4.5 Off-Target Filtering
 
 ---
 
