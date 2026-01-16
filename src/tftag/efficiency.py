@@ -13,7 +13,7 @@ def _build_rs3_30mer(row, fasta_dict):
     """
     Build 30-mer in target orientation:
       [4 nt upstream][20 nt spacer][PAM(3)][3 nt downstream]
-    Uses explicit protospacer/pam coords.
+    Uses explicit protospacer/pam coords (genomic, 1-based inclusive).
     """
     warns = []
     chrom = row["chromosome"]
@@ -24,22 +24,31 @@ def _build_rs3_30mer(row, fasta_dict):
     if prot_s is None or pam_s is None:
         return None, ["RS3 skipped: missing protospacer/pam coords"]
 
-    # 30-mer spans from 4 upstream of protospacer to 3 downstream of PAM
-    start_30 = prot_s - 4
-    end_30 = pam_e + 3
+    if grna_strand == "+":
+        # protospacer then PAM on the + strand
+        start_30 = prot_s - 4
+        end_30   = pam_e + 3
+
+    elif grna_strand == "-":
+        # PAM then protospacer in genomic coords; fetch reverse-complement
+        start_30 = pam_s - 3
+        end_30   = prot_e + 4
+        
+    else:
+        return None, [f"RS3 skipped: invalid grna_strand '{grna_strand}'"]
 
     clen = len(fasta_dict[chrom].seq)
     if start_30 < 1 or end_30 > clen:
-        # If you prefer clamping, use clamp=True; here we skip to avoid silent truncation.
         return None, [f"RS3 skipped: 30-mer out of contig ({chrom}:{start_30}-{end_30}, len={clen})"]
 
     seq30 = get_sequence(fasta_dict, chrom, start_30, end_30, grna_strand)
     if len(seq30) != 30:
         return None, [f"RS3 skipped: 30-mer length {len(seq30)} (expected 30)"]
 
-    # PAM should be positions 25-27 (1-based) => indices 24:27 in Python; "GG" at 26-27 => 25:27
-    if seq30[25:27] != "GG":
-        warns.append(f"RS3 30-mer PAM not NGG at expected positions (found {seq30[24:27]})")
+    # PAM should occupy positions 25–27 (1-based) => indices 24:27 (0-based slice)
+    pam_triplet = seq30[24:27]
+    if pam_triplet[1:3] != "GG":
+        warns.append(f"RS3 30-mer PAM not NGG at expected positions (found {pam_triplet})")
 
     return seq30, warns
 
