@@ -61,8 +61,6 @@ def main():
         pam_pattern=args.pam_pattern,
         no_offtarget_sites=args.no_offtarget_sites,
         per_terminus=args.per_tag,
-        write_csv=args.csv,
-        write_parquet=args.parquet,
         protospacer_overlap_len=args.protospacer_overlap_len,
     )
     return 0
