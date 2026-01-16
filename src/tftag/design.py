@@ -693,7 +693,7 @@ def _pick_single_primer(
             "PRIMER_GC_CLAMP": rd["clamp_min"],
         }
 
-        res = primer3.bindings.designPrimers(
+        res = primer3.bindings.design_primers(
             {"SEQUENCE_ID": "template", "SEQUENCE_TEMPLATE": seq_template},
             p3_args,
         )
