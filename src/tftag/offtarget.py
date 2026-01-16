@@ -3,7 +3,9 @@ Off-target enumeration with Cas-OFFinder.
 """
 from __future__ import annotations
 import os, subprocess, pandas as pd
+import re
 
+_STRAND_MM_RE = re.compile(r"([+-])\s*([0-9]+)\s*$")
 
 def write_cas_offinder_input(
     guides: pd.DataFrame,
@@ -74,6 +76,12 @@ def run_cas_offinder(input_file: str, cas_offinder_bin: str = "cas-offinder", de
 
 
 def parse_cas_offinder_output(hit_file: str) -> pd.DataFrame:
+    """
+    Parse Cas-OFFinder output robustly across formats, including lines ending with:
+      ... <strand> <mm>
+      ... <strand><mm>     (e.g. -0, +4)
+    and where the chromosome field may contain whitespace/metadata.
+    """
     rows = []
 
     def _is_int(tok: str) -> bool:
@@ -84,57 +92,42 @@ def parse_cas_offinder_output(hit_file: str) -> pd.DataFrame:
             return False
 
     with open(hit_file, "r") as f:
-        for line in f:
-            line = line.strip()
+        for raw in f:
+            line = raw.strip()
             if not line:
                 continue
 
-            # Split on any whitespace (handles tabs/spaces)
-            toks = line.split()
-            if len(toks) < 4:
+            # 1) Strand+mismatches are at the end, sometimes fused
+            m = _STRAND_MM_RE.search(line)
+            if not m:
+                continue
+            strand = m.group(1)
+            mismatches = int(m.group(2))
+
+            # 2) Remove trailing strand/mm and split remainder
+            core = line[: m.start()].strip()
+            toks = core.split()
+            if len(toks) < 3:
                 continue
 
             query = toks[0].upper()
-            # Find first integer token after query => position
+
+            # target sequence is usually the last token in the "core"
+            target = toks[-1].upper()
+
+            # 3) Find the genomic position: last integer token before target
             pos_idx = None
-            for i in range(1, len(toks)):
+            for i in range(len(toks) - 2, 0, -1):  # exclude query(0) and target(-1)
                 if _is_int(toks[i]):
                     pos_idx = i
                     break
             if pos_idx is None:
                 continue
-
-            # Chromosome descriptor may contain many tokens; take first token for clean contig name
-            chrom_field = " ".join(toks[1:pos_idx])
-            chrom = chrom_field.split()[0] if chrom_field else ""
-
             pos = int(toks[pos_idx])
 
-            # After pos: expect target, strand, mismatches (but strand+mismatch can be fused like '+4')
-            if pos_idx + 1 >= len(toks):
-                continue
-            target = toks[pos_idx + 1].upper()
-
-            strand = None
-            mismatches = None
-
-            # Case A: separate strand token
-            if pos_idx + 2 < len(toks):
-                s_tok = toks[pos_idx + 2]
-                if s_tok in ("+", "-"):
-                    strand = s_tok
-                    # mismatches should be next token
-                    if pos_idx + 3 < len(toks) and _is_int(toks[pos_idx + 3]):
-                        mismatches = int(toks[pos_idx + 3])
-                else:
-                    # Case B: fused like '+4' or '-3'
-                    if (s_tok.startswith("+") or s_tok.startswith("-")) and s_tok[1:].isdigit():
-                        strand = s_tok[0]
-                        mismatches = int(s_tok[1:])
-
-            if strand is None or mismatches is None:
-                # Could not parse; skip this line
-                continue
+            # 4) Chrom descriptor spans toks[1:pos_idx]; keep the first token as contig name
+            chrom_desc = " ".join(toks[1:pos_idx])
+            chrom = chrom_desc.split()[0] if chrom_desc else ""
 
             rows.append({
                 "spacer": query[:20],
