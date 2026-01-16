@@ -75,29 +75,76 @@ def run_cas_offinder(input_file: str, cas_offinder_bin: str = "cas-offinder", de
 
 def parse_cas_offinder_output(hit_file: str) -> pd.DataFrame:
     rows = []
+
+    def _is_int(tok: str) -> bool:
+        try:
+            int(tok)
+            return True
+        except Exception:
+            return False
+
     with open(hit_file, "r") as f:
         for line in f:
-            parts = line.strip().split("\t")
-            if len(parts) < 7:
-                parts = line.strip().split()
-            if len(parts) < 7:
+            line = line.strip()
+            if not line:
                 continue
-            query_seq, target_seq, chrom, pos, strand, mismatches, patt = parts[:7]
-            try:
-                pos = int(pos)
-                mismatches = int(mismatches)
-            except Exception:
+
+            # Split on any whitespace (handles tabs/spaces)
+            toks = line.split()
+            if len(toks) < 4:
                 continue
-            rows.append(
-                {
-                    "spacer": query_seq[:20].upper(),
-                    "offtarget_target": target_seq.upper(),
-                    "offtarget_chrom": chrom,
-                    "offtarget_pos": pos,
-                    "offtarget_strand": strand,
-                    "offtarget_mismatches": mismatches,
-                }
-            )
+
+            query = toks[0].upper()
+            # Find first integer token after query => position
+            pos_idx = None
+            for i in range(1, len(toks)):
+                if _is_int(toks[i]):
+                    pos_idx = i
+                    break
+            if pos_idx is None:
+                continue
+
+            # Chromosome descriptor may contain many tokens; take first token for clean contig name
+            chrom_field = " ".join(toks[1:pos_idx])
+            chrom = chrom_field.split()[0] if chrom_field else ""
+
+            pos = int(toks[pos_idx])
+
+            # After pos: expect target, strand, mismatches (but strand+mismatch can be fused like '+4')
+            if pos_idx + 1 >= len(toks):
+                continue
+            target = toks[pos_idx + 1].upper()
+
+            strand = None
+            mismatches = None
+
+            # Case A: separate strand token
+            if pos_idx + 2 < len(toks):
+                s_tok = toks[pos_idx + 2]
+                if s_tok in ("+", "-"):
+                    strand = s_tok
+                    # mismatches should be next token
+                    if pos_idx + 3 < len(toks) and _is_int(toks[pos_idx + 3]):
+                        mismatches = int(toks[pos_idx + 3])
+                else:
+                    # Case B: fused like '+4' or '-3'
+                    if (s_tok.startswith("+") or s_tok.startswith("-")) and s_tok[1:].isdigit():
+                        strand = s_tok[0]
+                        mismatches = int(s_tok[1:])
+
+            if strand is None or mismatches is None:
+                # Could not parse; skip this line
+                continue
+
+            rows.append({
+                "spacer": query[:20],
+                "offtarget_target": target,
+                "offtarget_chrom": chrom,
+                "offtarget_pos": pos,
+                "offtarget_strand": strand,
+                "offtarget_mismatches": mismatches,
+            })
+
     return pd.DataFrame(rows)
 
 
