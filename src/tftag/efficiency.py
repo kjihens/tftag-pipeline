@@ -7,6 +7,7 @@ import pandas as pd
 from tqdm import tqdm
 from .utils import get_sequence, clamp_range
 from .coords import protospacer_coords, pam_coords
+from .select import select_one_per_tag
 
 
 def _build_rs3_30mer(row, fasta_dict):

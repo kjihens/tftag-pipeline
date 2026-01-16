@@ -2,25 +2,23 @@
 End-to-end orchestrator.
 """
 from __future__ import annotations
-from email.mime import base
-import os, uuid
+
+import os
+import uuid
 import numpy as np
 import pandas as pd
 
-from . import annotate, storage as tio, scan, efficiency, offtarget, cclmoff, design
+from . import annotate, scan, efficiency, design
+from .genome_io import create_GTF_db, load_fasta_dict
+from .storage import to_sqlite
+from .select import select_one_per_tag
+from .helpers import parse_genes_arg
+from .off_targeting import (
+    enumerate_offtargets_cas_offinder,
+    merge_specificity,
+    filter_no_offtargets
+)
 
-
-def _parse_genes_arg(genes: str | None) -> list[str] | None:
-    if genes is None:
-        return None
-    genes = str(genes).strip()
-    if not genes:
-        return None
-    if os.path.exists(genes):
-        with open(genes) as fh:
-            return [ln.strip() for ln in fh if ln.strip()]
-    # comma-separated list
-    return [g.strip() for g in genes.split(",") if g.strip()]
 
 
 def run_pipeline(
@@ -33,31 +31,50 @@ def run_pipeline(
     pam_window_up: int = 30,
     pam_window_down: int = 30,
     tracrRNA: str = "Hsu2013",
-    do_specificity: bool = False,
+    batch_size_rs3: int = 2048,
+    protospacer_overlap_len: int = 13,
+    # Off-targets (Cas-OFFinder only)
+    run_offtargets: bool = True,
     cas_offinder_bin: str = "cas-offinder",
     device_spec: str = "C",
-    batch_size_rs3: int = 2048,
-    cclmoff_cmd: str | None = None,
-    cclmoff_pairs_path: str = "out/cclmoff_pairs.tsv",
-    cclmoff_preds_path: str = "out/cclmoff_preds.tsv",
-    cclmoff_agg_method: str = "max",
-    protospacer_overlap_len: int = 13,
+    mismatches: int = 4,
+    pam_pattern: str = "NNNNNNNNNNNNNNNNNNNNNGG",
+    no_offtarget_sites: bool = False,
+    # Selection / outputs
+    per_tag: str = "all",  # all|closest|rs3
+    write_csv: bool = True,
+    write_parquet: bool = True,
 ) -> None:
+    """
+    Run the TFTag pipeline.
 
-    # Ensure output directories exist
-    for p in [output_db_path, cclmoff_pairs_path, cclmoff_preds_path]:
-        os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+    Parameters of note
+    ------------------
+    per_tag:
+      - "all": keep all candidate guides for each (gene_id, tag)
+      - "closest": keep one guide per (gene_id, tag) with smallest cut_distance (tie-breaker: higher rs3, fewer hits)
+      - "rs3": keep one guide per (gene_id, tag) with highest rs3_score (tie-breaker: closer, fewer hits)
+
+    no_offtarget_sites:
+      Retain only guides with mm0 == 1 and mm1..mmN == 0 (requires run_offtargets=True).
+    """
+    if per_tag not in ("all", "closest", "rs3"):
+        raise ValueError("per_tag must be one of: all, closest, rs3")
+
+    # Ensure output directory exists
+    os.makedirs(os.path.dirname(output_db_path) or ".", exist_ok=True)
+    os.makedirs("out", exist_ok=True)
 
     run_id = uuid.uuid4().hex[:12]
 
     # Create/load GTF db
-    db = tio.createGTFdb(gtf_file, gtf_db_path)
+    db = create_GTF_db(gtf_file, gtf_db_path)
 
-    # Load genome FASTA (dict backend)
-    fasta_dict = tio.load_fasta_dict(genome_fasta_path)
+    # Load genome FASTA
+    fasta_dict = load_fasta_dict(genome_fasta_path)
 
     # Resolve genes list
-    genes_list = _parse_genes_arg(genes)
+    genes_list = parse_genes_arg(genes)
     if genes_list is None:
         genes_list = [g.id for g in db.features_of_type("gene")]
 
@@ -65,67 +82,61 @@ def run_pipeline(
     attribute = annotate.build_attribute_table(genes_list, db)
 
     # Scan for candidate guides
-    candidates = scan.scan_for_guides(attribute, fasta_dict, window_up=pam_window_up, window_down=pam_window_down)
+    candidates = scan.scan_for_guides(
+        attribute, fasta_dict, window_up=pam_window_up, window_down=pam_window_down
+    )
     if candidates.empty:
         print("No candidate guides found.")
         return
 
     # Prefilter feasibility (design-aware)
     candidates = design.prefilter_designable(candidates, fasta_dict, show_progress=True)
-
-    if not candidates["designable"].any():
+    if "designable" in candidates.columns and not candidates["designable"].any():
         print("No designable guides after prefilter.")
         return
 
     # RS3 scoring
-    candidates = efficiency.score_rs3(candidates, fasta_dict, tracrRNA=tracrRNA, batch_size=batch_size_rs3)
+    candidates = efficiency.score_rs3(
+        candidates, fasta_dict, tracrRNA=tracrRNA, batch_size=batch_size_rs3
+    )
 
-    # Off-target analysis
-    hits = pd.DataFrame()
-    if do_specificity:
-        inp = offtarget.write_cas_offinder_input(candidates, genome_fasta_path, outfile=f"out/{run_id}_cas_input.txt")
-        out = offtarget.run_cas_offinder(inp, cas_offinder_bin=cas_offinder_bin, device_spec=device_spec, output_file=f"out/{run_id}_cas_hits.txt")
-        hits = offtarget.parse_cas_offinder_output(out)
-        spec = offtarget.summarize_specificity(hits)
-
-        # Uniqueness safety
-        if not spec["spacer"].is_unique:
-            raise RuntimeError("Specificity summary is not unique per spacer; check parser/aggregator.")
-
-        candidates = candidates.merge(spec, on="spacer", how="left")
+    # Off-target enumeration (Cas-OFFinder)
+    if run_offtargets:
+        hits, spec = enumerate_offtargets_cas_offinder(
+            candidates,
+            genome_fasta_path,
+            out_dir="out",
+            run_id=run_id,
+            cas_offinder_bin=cas_offinder_bin,
+            device_spec=device_spec,
+            mismatches=mismatches,
+            pam_pattern=pam_pattern,
+        )
+        candidates = merge_specificity(candidates, spec, mismatches=mismatches)
     else:
-        for col in ["n_hits", "n_mm0", "n_mm1", "n_mm2", "n_mm3", "n_mm4"]:
-            candidates[col] = np.nan
+        candidates["n_hits"] = np.nan
+        for k in range(0, mismatches + 1):
+            candidates[f"n_mm{k}"] = np.nan
 
-    # CCLMoff (optional)
-    if cclmoff_cmd:
-        if hits.empty:
-            inp = offtarget.write_cas_offinder_input(candidates, genome_fasta_path, outfile=f"out/{run_id}_cas_input.txt")
-            out = offtarget.run_cas_offinder(inp, cas_offinder_bin=cas_offinder_bin, device_spec=device_spec, output_file=f"out/{run_id}_cas_hits.txt")
-            hits = offtarget.parse_cas_offinder_output(out)
-
-        pairs_map = cclmoff.build_pairs_from_hits(candidates, hits, fasta_dict, outfile=cclmoff_pairs_path)
-        preds_file = cclmoff.run_cclmoff_from_template(cclmoff_pairs_path, cclmoff_preds_path, cclmoff_cmd)
-        preds = cclmoff.parse_cclmoff_output(preds_file)
-        agg = cclmoff.aggregate(pairs_map, preds)
-
-        if not agg["spacer"].is_unique:
-            raise RuntimeError("CCLMoff aggregate is not unique per spacer; check pairing/aggregation.")
-
-        candidates = candidates.merge(agg, on="spacer", how="left")
-
-        # choose primary score if you want a single column
-        if cclmoff_agg_method == "max" and "cclmoff_max" in candidates.columns:
-            candidates["cclmoff_primary"] = candidates["cclmoff_max"]
-        elif cclmoff_agg_method == "sum" and "cclmoff_sum" in candidates.columns:
-            candidates["cclmoff_primary"] = candidates["cclmoff_sum"]
+    # Filter to guides with no detectable off-targets (if requested)
+    if no_offtarget_sites:
+        if not run_offtargets:
+            print("Warning: --no-offtarget-sites requested but off-target enumeration is disabled. Returning no results.")
+            return
+        candidates = filter_no_offtargets(candidates, mismatches=mismatches)
+        if candidates.empty:
+            print("No guides remain after applying --no-offtarget-sites filter.")
+            return
 
     # Homology arms
     candidates = design.add_homology_arms(candidates, fasta_dict, show_progress=True)
 
     # Decide which arm to mutate
     candidates = design.choose_arm_for_mutation(
-        candidates, protospacer_overlap_len=protospacer_overlap_len, coding_only=True, show_progress=True
+        candidates,
+        protospacer_overlap_len=protospacer_overlap_len,
+        coding_only=True,
+        show_progress=True,
     )
 
     # Apply silent edits
@@ -134,24 +145,39 @@ def run_pipeline(
     # Validation primers
     candidates = design.validation_primers(candidates, fasta_dict, show_progress=True)
 
-    # Add run provenance
+    # Reduce to one guide per (gene_id, tag) if requested
+    candidates = select_one_per_tag(candidates, mode=per_tag)
+
+    # Add provenance
     candidates["run_id"] = run_id
     candidates["gtf_db_path"] = gtf_db_path
     candidates["genome_fasta_path"] = genome_fasta_path
 
-    # Write outputs
-    tio.to_sqlite(candidates, output_db_path, output_table, if_exists="append", index=False, create_indices=False)
-    
+    # Write SQLite
+    to_sqlite(
+        candidates,
+        output_db_path,
+        output_table,
+        if_exists="append",
+        index=False,
+        create_indices=True,
+    )
+
+    # Optional snapshots
     base = os.path.splitext(output_db_path)[0]
-    parquet_path = base + ".parquet"
-    csv_path = base + ".csv"
+    if write_parquet:
+        parquet_path = base + ".parquet"
+        os.makedirs(os.path.dirname(parquet_path) or ".", exist_ok=True)
+        candidates.to_parquet(parquet_path, index=False)
+    if write_csv:
+        csv_path = base + ".csv"
+        os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
+        candidates.to_csv(csv_path, index=False)
 
-    os.makedirs(os.path.dirname(parquet_path) or ".", exist_ok=True)
-
-    candidates.to_parquet(parquet_path, index=False)
-    candidates.to_csv(csv_path, index=False)
-
+    # Console summary
     print(f"Finished. Wrote {len(candidates)} guides to:")
     print(f"   - {output_db_path}")
-    print(f"   - {parquet_path}")
-    print(f"   - {csv_path}")
+    if write_parquet:
+        print(f"   - {base}.parquet")
+    if write_csv:
+        print(f"   - {base}.csv")
