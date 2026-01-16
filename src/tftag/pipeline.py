@@ -38,7 +38,7 @@ def run_pipeline(
     cas_offinder_bin: str = "cas-offinder",
     device_spec: str = "C",
     mismatches: int = 4,
-    pam_pattern: str = "NNNNNNNNNNNNNNNNNNNNNGG",
+    pam_pattern: str = "NNNNNNNNNNNNNNNNNNNN",
     no_offtarget_sites: bool = False,
     # Selection / outputs
     per_tag: str = "all",  # all|closest|rs3

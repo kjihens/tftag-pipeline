@@ -35,7 +35,7 @@ def main():
     ap.add_argument("--cas-offinder", default="cas-offinder")
     ap.add_argument("--device", default="C")
     ap.add_argument("--mismatches", type=int, default=4)
-    ap.add_argument("--pam-pattern", default="NNNNNNNNNNNNNNNNNNNNNGG")
+    ap.add_argument("--pam-pattern", default="NNNNNNNNNNNNNNNNNNNN")
     ap.add_argument("--no-offtarget-sites", action="store_true", help="Keep only guides with no off-target hits (mm1..mmN == 0 and mm0==1)")
 
     # Selection

@@ -8,16 +8,54 @@ import os, subprocess, pandas as pd
 def write_cas_offinder_input(
     guides: pd.DataFrame,
     genome_fasta_path: str,
-    pam_pattern: str = "NNNNNNNNNNNNNNNNNNNNNGG",
+    pam_pattern: str = "NNNNNNNNNNNNNNNNNNNN",  # 20N (protospacer only)
     outfile: str = "cas_offinder_input.txt",
     mismatches: int = 4,
+    seq_col: str = "spacer",
 ) -> str:
+    """
+    Write Cas-OFFinder input file.
+
+    Notes:
+      - Cas-OFFinder requires: len(pattern) == len(target_sequence) for every query line.
+      - We use 20-nt protospacers by default (no PAM in the query).
+    """
     os.makedirs(os.path.dirname(outfile) or ".", exist_ok=True)
+
+    pattern = str(pam_pattern).strip().upper()
+    patt_len = len(pattern)
+    if patt_len == 0:
+        raise ValueError("pam_pattern is empty.")
+
+    if seq_col not in guides.columns:
+        raise KeyError(f"Column '{seq_col}' not found in guides DataFrame.")
+
+    seqs = (
+        guides[seq_col]
+        .dropna()
+        .astype(str)
+        .str.upper()
+        .str.replace(r"\s+", "", regex=True)
+        .unique()
+        .tolist()
+    )
+    seqs = sorted(seqs)
+
+    # Validate sequence lengths
+    bad = [s for s in seqs if len(s) != patt_len]
+    if bad:
+        examples = ", ".join(bad[:5])
+        raise ValueError(
+            f"Cas-OFFinder input error: {len(bad)} sequences in '{seq_col}' do not match "
+            f"pattern length {patt_len}. Examples: {examples}"
+        )
+
     with open(outfile, "w") as f:
         f.write(genome_fasta_path + "\n")
-        f.write(pam_pattern + "\n")
-        for seq in sorted(set(guides["spacer"].dropna().astype(str).str.upper())):
-            f.write(f"{seq} {mismatches}\n")
+        f.write(pattern + "\n")
+        for seq in seqs:
+            f.write(f"{seq} {int(mismatches)}\n")
+
     return outfile
 
 
