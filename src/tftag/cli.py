@@ -35,7 +35,7 @@ def main():
     ap.add_argument("--cas-offinder", default="cas-offinder")
     ap.add_argument("--device", default="C")
     ap.add_argument("--mismatches", type=int, default=4)
-    ap.add_argument("--pam-pattern", default="NNNNNNNNNNNNNNNNNNNN")
+    ap.add_argument("--pam-pattern", default="NNNNNNNNNNNNNNNNNNNNNGG")
     ap.add_argument("--min-offtarget-mismatch", type=int, default=0, help="Minimum mismatch count allowed for off-target sites (e.g. 2 = allow ≥2 mismatches only).")
 
     # Selection
