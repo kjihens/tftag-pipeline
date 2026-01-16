@@ -60,7 +60,7 @@ def main():
         mismatches=args.mismatches,
         pam_pattern=args.pam_pattern,
         no_offtarget_sites=args.no_offtarget_sites,
-        per_terminus=args.per_tag,
+        per_tag=args.per_tag,
         protospacer_overlap_len=args.protospacer_overlap_len,
     )
     return 0
