@@ -16,15 +16,18 @@ def _validate_ident(x: str, what: str) -> str:
 
 def to_sqlite(
     df: pd.DataFrame,
-    db_path: str,
+    base_name: str,
+    outdir: str,
     table: str,
     if_exists: str = "append",
     index: bool = False,
     create_indices: bool = False,
     chunksize: int = 5000,
 ) -> None:
-    os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
+    os.makedirs(outdir or ".", exist_ok=True)
     table = _validate_ident(table, "table name")
+
+    db_path = os.path.join(outdir, base_name + ".sqlite")
 
     with sqlite3.connect(db_path) as conn:
         cur = conn.cursor()

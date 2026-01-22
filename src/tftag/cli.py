@@ -16,8 +16,16 @@ def main():
     ap.add_argument("--genes", default=None, help="Either (a) path to a file with one gene ID per line, or (b) comma-separated gene IDs.")
     
     # Outputs
-    ap.add_argument("--outdb", default="out/tftag_guides.sqlite", help="Output SQLite database path.")
+    ap.add_argument("--basename", default="tftag", help="Base name for output files (DB, CSV, Parquet).")
+    ap.add_argument("--outdir", default="out", help="Output directory.")
     ap.add_argument("--table", default="guides", help="Output table name in SQLite DB.")
+    ap.add_argument("--write-csv", dest="write_csv", action="store_true", help="Also write output table as CSV.")
+    ap.add_argument("--no-write-csv", dest="write_csv", action="store_false", help="Do not write output table as CSV.")
+    ap.set_defaults(write_csv=True)
+    ap.add_argument("--write-parquet", dest="write_parquet", action="store_true", help="Also write output table as Parquet.")
+    ap.add_argument("--no-write-parquet", dest="write_parquet", action="store_false", help="Do not write output table as Parquet.")
+    ap.set_defaults(write_parquet=False)
+
 
     # Guide scanning
     ap.add_argument("--pam_up", type=int, default=30, help="bp upstream of codon to scan for PAMs.")
@@ -48,7 +56,8 @@ def main():
         gtf_db_path=args.db,
         genome_fasta_path=args.fasta,
         genes=args.genes,
-        output_db_path=args.outdb,
+        basename=args.basename,
+        outdir=args.outdir,
         output_table=args.table,
         pam_window_up=args.pam_up,
         pam_window_down=args.pam_down,
@@ -62,6 +71,8 @@ def main():
         min_offtarget_mismatch=args.min_offtarget_mismatch,
         per_tag=args.per_tag,
         protospacer_overlap_len=args.protospacer_overlap_len,
+        write_csv=args.write_csv,
+        write_parquet=args.write_parquet,
     )
     return 0
 

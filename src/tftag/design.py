@@ -1,34 +1,26 @@
 """
 Design utilities for TFTag:
 - Build 240 bp homology arms (HAL/HAR) around start/stop codons.
-- Apply *silent* edits to prevent re-cutting by the on-target gRNA:
-  1) Prefer a single synonymous change that breaks the PAM (rank 1).
-  2) Otherwise, one synonymous change within the protospacer (rank 2).
-  3) Otherwise, two synonymous changes within the protospacer near the PAM edge (rank 3).
+- Apply *silent* edits to prevent re-cutting by the on-target gRNA.
 
 Conventions
 -----------
 - Genomic coordinates are 1-based inclusive.
 - Homology arm sequences (HAL_seq_gene/HAR_seq_gene) are returned in *gene orientation*
-  (i.e. reverse-complemented for genes on the '-' strand). This keeps codon indexing
-  consistent across strands.
+  (reverse-complemented for genes on '-' strand). This keeps indexing consistent.
 
-Expected input schema (post-scan)
----------------------------------
-Required columns for most functions:
-  - chromosome
-  - feature: 'start_codon' | 'stop_codon'
-  - gene_strand: '+' | '-'
-  - codon_start, codon_end  (1-based inclusive)
-  - designable (bool)  [added by prefilter_designable]
+Editing strategy (in order)
+---------------------------
+1) Prefer 1 synonymous change inside PAM (break "GG" of NGG) if PAM lies in the coding arm.
+2) Else 1 synonymous change inside protospacer (prioritise PAM-proximal edge).
+3) Else 2 synonymous changes inside protospacer (again prioritising PAM-proximal edge).
 
-For editing functions, you also need:
-  - grna_strand: '+' | '-'
-  - protospacer_start, protospacer_end (1-based inclusive)
-  - pam_start, pam_end (1-based inclusive)
-
-This module relies on coords.py for PAM/protospacer coordinate access:
-  from .coords import pam_coords, protospacer_coords
+Important correctness note
+--------------------------
+Synonymous checking requires correct codon frame within the arm sequence.
+- For start_codon, the coding arm is HAR which starts immediately after start codon => frame anchor at arm index 0.
+- For stop_codon, the coding arm is HAL which ends immediately before stop codon => frame anchor at the last codon start
+  within the arm (arm_len - 3). We therefore define codons relative to that anchor.
 """
 from __future__ import annotations
 
@@ -50,7 +42,7 @@ from .coords import pam_coords, protospacer_coords
 def _arm_ranges(feature: str, strand: str, codon_start: int, codon_end: int) -> Tuple[Tuple[int, int], Tuple[int, int]]:
     """
     Return genomic ranges for HAL and HAR (240 bp each) around a start/stop codon.
-    Ranges are in genomic coordinates (1-based inclusive).
+    Ranges are 1-based inclusive.
 
     HAL is the "left" arm in *gene orientation*; HAR is the "right" arm.
     """
@@ -68,21 +60,15 @@ def _arm_ranges(feature: str, strand: str, codon_start: int, codon_end: int) -> 
 
 
 def _genomic_to_coding_index(pos: int, arm_start: int, arm_end: int, gene_strand: str) -> Optional[int]:
-    """Map a genomic position to 0-based index within a gene-oriented arm; return None if outside."""
+    """Map genomic position to 0-based index within a gene-oriented arm; return None if outside."""
     if pos < arm_start or pos > arm_end:
         return None
-    if gene_strand == "+":
-        return pos - arm_start
-    else:
-        return arm_end - pos
+    return (pos - arm_start) if gene_strand == "+" else (arm_end - pos)
 
 
 def _coding_index_to_genomic(idx: int, arm_start: int, arm_end: int, gene_strand: str) -> int:
-    """Inverse of _genomic_to_coding_index."""
-    if gene_strand == "+":
-        return arm_start + idx
-    else:
-        return arm_end - idx
+    """Inverse mapping of _genomic_to_coding_index."""
+    return (arm_start + idx) if gene_strand == "+" else (arm_end - idx)
 
 
 def _indices_within_arm(arm_start: int, arm_end: int, gene_strand: str, positions: List[int]) -> List[int]:
@@ -99,10 +85,7 @@ def _indices_within_arm(arm_start: int, arm_end: int, gene_strand: str, position
 # Warnings helper
 # -----------------------------
 def _merge_warn(prev, new) -> str:
-    """
-    Merge warnings into a semicolon-separated unique list.
-    `new` may be a list[str] or a single str.
-    """
+    """Merge warnings into a semicolon-separated unique list."""
     if isinstance(new, str):
         new_list = [new] if new else []
     else:
@@ -114,21 +97,33 @@ def _merge_warn(prev, new) -> str:
 
 
 # -----------------------------
-# Synonymous edit helpers
+# Synonymous edit helpers (frame-aware)
 # -----------------------------
 def _translate_codon(codon: str) -> str:
     return str(Seq(codon).translate(table=1))
 
 
-def _try_synonymous_change(coding_seq: str, idx: int) -> Optional[Tuple[str, Dict]]:
-    """Attempt a single-nucleotide synonymous change at coding index `idx`."""
+def _codon_start_for_idx(idx: int, *, anchor: int) -> int:
+    """
+    Given an index and a codon-frame anchor, return the codon start index.
+
+    anchor is an index that is known to be a codon start (frame position 0).
+    """
+    return idx - ((idx - anchor) % 3)
+
+
+def _try_synonymous_change(coding_seq: str, idx: int, *, anchor: int) -> Optional[Tuple[str, Dict]]:
+    """
+    Attempt a single-nucleotide synonymous change at coding index `idx`,
+    using a frame anchor to define codon boundaries.
+    """
     bases = ["A", "C", "G", "T"]
     if idx < 0 or idx >= len(coding_seq) or coding_seq[idx] not in bases:
         return None
 
-    codon_start = (idx // 3) * 3
+    codon_start = _codon_start_for_idx(idx, anchor=anchor)
     codon_end = codon_start + 3
-    if codon_end > len(coding_seq):
+    if codon_start < 0 or codon_end > len(coding_seq):
         return None
 
     codon = list(coding_seq[codon_start:codon_end])
@@ -151,12 +146,13 @@ def _try_synonymous_change(coding_seq: str, idx: int) -> Optional[Tuple[str, Dic
                     "codon_from": "".join(codon),
                     "codon_to": "".join(codon_mut),
                     "codon_start": codon_start,
+                    "anchor": anchor,
                 },
             )
     return None
 
 
-def _two_synonymous_changes_near(coding_seq: str, candidate_indices: List[int]) -> Optional[Tuple[str, List[Dict]]]:
+def _two_synonymous_changes_near(coding_seq: str, candidate_indices: List[int], *, anchor: int) -> Optional[Tuple[str, List[Dict]]]:
     """
     Try to apply two synonymous changes using the provided candidate indices (in order).
     Returns (mutated_seq, [mut1, mut2]) or None.
@@ -164,7 +160,7 @@ def _two_synonymous_changes_near(coding_seq: str, candidate_indices: List[int]) 
     seq = coding_seq
     muts: List[Dict] = []
     for idx in candidate_indices:
-        attempt = _try_synonymous_change(seq, idx)
+        attempt = _try_synonymous_change(seq, idx, anchor=anchor)
         if attempt is None:
             continue
         seq, rec = attempt
@@ -180,17 +176,30 @@ def _fmt_mut_locations(chrom: str, gene_strand: str, arm_start: int, arm_end: in
         return "none"
 
     def comp(b: str) -> str:
-        table = str.maketrans("ACGT", "TGCA")
-        return b.translate(table)
+        return b.translate(str.maketrans("ACGT", "TGCA"))
 
     items = []
     for m in muts:
         pos = _coding_index_to_genomic(m["idx"], arm_start, arm_end, gene_strand)
-        # m['from']/['to'] are coding-oriented; convert to genomic letters on minus
         b_from = m["from"] if gene_strand == "+" else comp(m["from"])
         b_to = m["to"] if gene_strand == "+" else comp(m["to"])
         items.append(f"{b_from}-{chrom}:{pos}-{b_to}")
     return ", ".join(items)
+
+
+def _frame_anchor_for_arm(*, feature: str, target_arm: str, arm_len: int) -> int:
+    """
+    Define a codon-frame anchor within the *gene-oriented* arm sequence.
+
+    - start_codon: coding arm is HAR and starts exactly at codon boundary => anchor = 0
+    - stop_codon:  coding arm is HAL and ends exactly at codon boundary => anchor = arm_len - 3
+    """
+    if feature == "start_codon" and target_arm == "HAR":
+        return 0
+    if feature == "stop_codon" and target_arm == "HAL":
+        return arm_len - 3
+    # If called elsewhere, be explicit rather than silently wrong.
+    raise ValueError(f"Unsupported frame anchor request: feature={feature}, target_arm={target_arm}")
 
 
 # -----------------------------
@@ -207,15 +216,8 @@ def prefilter_designable(
     show_progress: bool = True,
 ) -> pd.DataFrame:
     """
-    Mark rows as designable only if BOTH homology arms and BOTH validation-primer windows
-    lie fully within the chromosome (no truncation). Avoids later clamping.
-
-    Requires:
-      chromosome, feature, gene_strand, codon_start, codon_end
-
-    Adds:
-      designable: bool
-      skip_reason: "none" or semicolon-separated reasons
+    Mark rows as designable only if BOTH homology arms and BOTH primer windows
+    lie fully within the chromosome (no truncation).
     """
     df = gRNA_df.copy()
     if "skip_reason" not in df.columns:
@@ -289,14 +291,6 @@ def add_homology_arms(
 ) -> pd.DataFrame:
     """
     Compute HAL/HAR genomic ranges (clamped) and gene-oriented sequences.
-
-    Requires:
-      chromosome, feature, gene_strand, codon_start, codon_end, designable
-
-    Adds:
-      HALs, HALe, HARs, HARe,
-      HAL_seq_gene, HAR_seq_gene,
-      warnings
     """
     df = gRNA_df.copy()
     if "warnings" not in df.columns:
@@ -328,7 +322,7 @@ def add_homology_arms(
         (HALs, HALe), (HARs, HARe) = _arm_ranges(feature, strand, cs, ce)
         clen = contig_len_cache.setdefault(chrom, len(fasta_dict[chrom].seq))
 
-        # clamp as a safety net; designable prefilter should already guarantee in-bounds
+        # Clamp as a safety net; designable prefilter should already guarantee in-bounds.
         HALs, HALe = clamp_range(HALs, HALe, clen)
         HARs, HARe = clamp_range(HARs, HARe, clen)
 
@@ -365,18 +359,13 @@ def choose_arm_for_mutation(
     show_progress: bool = True,
 ) -> pd.DataFrame:
     """
-    Determine which arm (HAL/HAR) needs modification based on containment of:
-      PAM + protospacer_overlap_len PAM-proximal bases of protospacer.
+    Determine which arm (HAL/HAR) contains the "protected window":
+      PAM + N PAM-proximal protospacer bases.
 
-    Requires:
-      designable, HALs/HALe/HARs/HARe present (from add_homology_arms),
-      plus PAM/protospacer coords and grna_strand.
-
-    Adds/updates:
-      requires_edit_arm: 'HAL'|'HAR'|'none'
-      rejected: bool
-      reject_reason: text
-      warnings (if missing coords)
+    If coding_only=True:
+      - start_codon must edit HAR (coding downstream)
+      - stop_codon must edit HAL (coding upstream)
+      otherwise reject.
     """
     df = gRNA_df.copy()
     if "warnings" not in df.columns:
@@ -396,6 +385,7 @@ def choose_arm_for_mutation(
 
     for row in iterator:
         idx = row.Index
+
         if pd.isna(getattr(row, "HALs", np.nan)) or pd.isna(getattr(row, "HARs", np.nan)):
             work.at[idx, "requires_edit_arm"] = "none"
             continue
@@ -417,6 +407,7 @@ def choose_arm_for_mutation(
             work.at[idx, "warnings"] = _merge_warn(work.at[idx, "warnings"], ["Missing/invalid grna_strand; cannot choose edit arm"])
             continue
 
+        # Protected window is genomic coordinates; containment check is genomic.
         if grna_strand == "+":
             window_s = max(prot_e - (protospacer_overlap_len - 1), prot_s)
             window_e = pam_e
@@ -430,7 +421,6 @@ def choose_arm_for_mutation(
         in_HAL = contains(HALs, HALe, window_s, window_e)
         in_HAR = contains(HARs, HARe, window_s, window_e)
 
-        # HAL and HAR should be disjoint; if both true something is wrong
         if in_HAL and in_HAR:
             work.at[idx, "warnings"] = _merge_warn(work.at[idx, "warnings"], ["Internal error: edit window contained in both arms"])
             target_arm = "none"
@@ -451,35 +441,21 @@ def choose_arm_for_mutation(
 
 
 # -----------------------------
-# Apply silent edits
+# Apply silent edits (frame-aware, strand-correct)
 # -----------------------------
-def apply_silent_edits(
-    gRNA_df: pd.DataFrame,
-    show_progress: bool = True,
-) -> pd.DataFrame:
+def apply_silent_edits(gRNA_df: pd.DataFrame, show_progress: bool = True) -> pd.DataFrame:
     """
     Apply PAM/protospacer silent edits to the required coding arm when needed & allowed.
 
-    Requires (for rows you want to edit):
-      - HALs/HALe/HARs/HARe
-      - HAL_seq_gene/HAR_seq_gene
-      - gene_strand
-      - grna_strand
-      - protospacer/pam coords
-      - requires_edit_arm (from choose_arm_for_mutation)
-      - rejected (optional)
-
-    Adds/updates:
-      - HAL_seq_mut, HAR_seq_mut
-      - HAL mutation location, HAR mutation location
-      - edit_arm
-      - warnings (appends if no synonymous edits possible)
+    Correctness:
+      - Uses a codon-frame anchor appropriate to the arm being edited.
+      - PAM/protospacer "PAM-edge" logic depends on grna_strand only (not gene_strand).
+      - Prefer edits that mutate 'G' positions in the guide-orientation pam_seq (NGG).
     """
     df = gRNA_df.copy()
     if "warnings" not in df.columns:
         df["warnings"] = "none"
 
-    # Ensure columns exist
     for col, default in [
         ("HAL_seq_mut", ""),
         ("HAR_seq_mut", ""),
@@ -501,19 +477,19 @@ def apply_silent_edits(
     for row in iterator:
         idx = row.Index
         rowd = row._asdict()
+
         chrom = rowd["chromosome"]
         gene_strand = rowd["gene_strand"]
+        feature = rowd["feature"]
 
-        # Default: copy sequences through
+        # Copy-through defaults.
         HAL_gene = rowd.get("HAL_seq_gene")
         HAR_gene = rowd.get("HAR_seq_gene")
-
-        if HAL_gene is not None:
+        if isinstance(HAL_gene, str) and HAL_gene:
             work.at[idx, "HAL_seq_mut"] = HAL_gene
-        if HAR_gene is not None:
+        if isinstance(HAR_gene, str) and HAR_gene:
             work.at[idx, "HAR_seq_mut"] = HAR_gene
 
-        # If missing prerequisites or rejected, keep originals
         if rowd.get("rejected", False):
             continue
 
@@ -521,13 +497,13 @@ def apply_silent_edits(
         if target_arm in (None, "", "none"):
             continue
 
-        # Arm sequence and bounds in gene orientation
+        # Determine arm coordinates + sequence in gene orientation.
         if target_arm == "HAR":
             arm_start, arm_end = int(rowd["HARs"]), int(rowd["HARe"])
-            arm_seq = rowd["HAR_seq_gene"]
+            arm_seq = rowd.get("HAR_seq_gene", "")
         else:
             arm_start, arm_end = int(rowd["HALs"]), int(rowd["HALe"])
-            arm_seq = rowd["HAL_seq_gene"]
+            arm_seq = rowd.get("HAL_seq_gene", "")
 
         if not isinstance(arm_seq, str) or not arm_seq:
             work.at[idx, "warnings"] = _merge_warn(work.at[idx, "warnings"], [f"Missing {target_arm}_seq_gene; cannot edit"])
@@ -544,82 +520,92 @@ def apply_silent_edits(
             work.at[idx, "warnings"] = _merge_warn(work.at[idx, "warnings"], ["Missing PAM/protospacer coords; cannot apply edits"])
             continue
 
+        # Frame anchor (critical for correct synonymous edits)
+        anchor = _frame_anchor_for_arm(feature=feature, target_arm=target_arm, arm_len=len(arm_seq))
+
         hal_muts: List[Dict] = []
         har_muts: List[Dict] = []
-        did_single_pam = False
-        did_single_prot = False
-        did_double = False
 
-        # (1) Single synonymous edit in PAM (prefer breaking a G in NGG if possible).
-        # Note: We do NOT explicitly validate coding frame here; we simply ensure synonymous at AA level.
+        def _append_mut(rec: Dict) -> None:
+            (har_muts if target_arm == "HAR" else hal_muts).append(rec)
+
+        did_edit = False
+
+        # ---------- (1) Try single synonymous mutation in PAM, prioritising 'G' positions in guide PAM ----------
+        pam_seq_guide = str(rowd.get("pam_seq", "")).upper()
         pam_positions = list(range(int(pam_s), int(pam_e) + 1))
         pam_idxs = _indices_within_arm(arm_start, arm_end, gene_strand, pam_positions)
 
-        # If PAM fully within arm: length 3
-        if len(pam_idxs) == 3:
-            # Heuristic: mutate PAM-proximal "GG" in the guide orientation.
-            # When grna_strand == gene_strand, gene-oriented sequence matches guide target strand orientation,
-            # so GG correspond to indices [1,2] within the PAM triplet in gene orientation.
-            # Otherwise, attempt [0,1] first.
-            if grna_strand == gene_strand:
-                candidate_pam_indices = [pam_idxs[1], pam_idxs[2]]
-            else:
-                candidate_pam_indices = [pam_idxs[0], pam_idxs[1]]
+        if len(pam_idxs) == 3 and len(pam_seq_guide) == 3:
+            # Identify guide PAM indices that are 'G' (ideally the two trailing Gs of NGG).
+            g_positions = [i for i, b in enumerate(pam_seq_guide) if b == "G"]
+            # Prefer mutating G positions first, but fall back to any PAM position.
+            guide_order = g_positions + [i for i in range(3) if i not in g_positions]
 
-            for pi in candidate_pam_indices:
-                attempt = _try_synonymous_change(arm_seq, pi)
+            # Map guide PAM index -> genomic position -> arm index.
+            for gi in guide_order:
+                if grna_strand == "+":
+                    gpos = int(pam_s) + gi
+                else:
+                    gpos = int(pam_e) - gi  # reversed in guide orientation
+                aidx = _genomic_to_coding_index(gpos, arm_start, arm_end, gene_strand)
+                if aidx is None:
+                    continue
+
+                attempt = _try_synonymous_change(arm_seq, aidx, anchor=anchor)
                 if attempt is not None:
                     arm_seq, rec = attempt
-                    (har_muts if target_arm == "HAR" else hal_muts).append(rec)
-                    did_single_pam = True
+                    _append_mut(rec)
+                    did_edit = True
                     break
 
-        # (2) Single synonymous edit in protospacer (try nearest to PAM edge first if possible)
-        if not did_single_pam:
+        # ---------- (2) Try single synonymous mutation in protospacer, near PAM-proximal edge ----------
+        if not did_edit:
             prot_positions = list(range(int(prot_s), int(prot_e) + 1))
             prot_idxs = _indices_within_arm(arm_start, arm_end, gene_strand, prot_positions)
 
             if prot_idxs:
-                # Try indices closest to PAM edge (in gene-oriented indexing)
-                pam_edge_pos = int(pam_s) if grna_strand == gene_strand else int(pam_e)
+                # PAM-proximal end depends on gRNA strand (genomic), not gene strand.
+                pam_edge_pos = int(prot_e) if grna_strand == "+" else int(prot_s)
                 pam_edge_idx = _genomic_to_coding_index(pam_edge_pos, arm_start, arm_end, gene_strand)
+
                 if pam_edge_idx is not None:
                     prot_idxs = sorted(prot_idxs, key=lambda i: (abs(i - pam_edge_idx), i))
 
                 for pi in prot_idxs:
-                    attempt = _try_synonymous_change(arm_seq, pi)
+                    attempt = _try_synonymous_change(arm_seq, pi, anchor=anchor)
                     if attempt is not None:
                         arm_seq, rec = attempt
-                        (har_muts if target_arm == "HAR" else hal_muts).append(rec)
-                        did_single_prot = True
+                        _append_mut(rec)
+                        did_edit = True
                         break
 
-        # (3) Two synonymous edits in protospacer (near PAM if possible)
-        if not (did_single_pam or did_single_prot):
+        # ---------- (3) Try two synonymous mutations in protospacer, prioritising PAM edge ----------
+        if not did_edit:
             prot_positions = list(range(int(prot_s), int(prot_e) + 1))
             prot_idxs = _indices_within_arm(arm_start, arm_end, gene_strand, prot_positions)
+
             if prot_idxs:
-                pam_edge_pos = int(pam_s) if grna_strand == gene_strand else int(pam_e)
+                pam_edge_pos = int(prot_e) if grna_strand == "+" else int(prot_s)
                 pam_edge_idx = _genomic_to_coding_index(pam_edge_pos, arm_start, arm_end, gene_strand)
                 if pam_edge_idx is not None:
                     prot_idxs = sorted(prot_idxs, key=lambda i: (abs(i - pam_edge_idx), i))
 
-                attempt2 = _two_synonymous_changes_near(arm_seq, prot_idxs)
+                attempt2 = _two_synonymous_changes_near(arm_seq, prot_idxs, anchor=anchor)
                 if attempt2 is not None:
                     arm_seq, muts = attempt2
-                    (har_muts if target_arm == "HAR" else hal_muts).extend(muts)
-                    did_double = True
+                    for rec in muts:
+                        _append_mut(rec)
+                    did_edit = True
 
-        # Commit mutated sequences
+        # Commit mutated sequences (only the target arm changes).
         work.at[idx, "edit_arm"] = target_arm
         if target_arm == "HAR":
             work.at[idx, "HAR_seq_mut"] = arm_seq
-            work.at[idx, "HAL_seq_mut"] = rowd.get("HAL_seq_gene", work.at[idx, "HAL_seq_mut"])
         else:
             work.at[idx, "HAL_seq_mut"] = arm_seq
-            work.at[idx, "HAR_seq_mut"] = rowd.get("HAR_seq_gene", work.at[idx, "HAR_seq_mut"])
 
-        # Record locations
+        # Record edit locations for both arms (only one should be non-"none").
         work.at[idx, "HAL mutation location"] = _fmt_mut_locations(
             chrom, gene_strand, int(rowd["HALs"]), int(rowd["HALe"]), hal_muts
         )
@@ -627,7 +613,7 @@ def apply_silent_edits(
             chrom, gene_strand, int(rowd["HARs"]), int(rowd["HARe"]), har_muts
         )
 
-        if not (did_single_pam or did_single_prot or did_double):
+        if not did_edit:
             work.at[idx, "warnings"] = _merge_warn(
                 work.at[idx, "warnings"],
                 [f"No synonymous mutation could be applied in target {target_arm} arm (kept original sequence)"],
@@ -652,27 +638,25 @@ def _count_trailing_gc(primer: str) -> int:
     return c
 
 
-def _pick_single_primer(
-    seq_template: str,
-    which: str,
-    rounds: list,
-    max_end_gc: int = 3,
-    show_reason: bool = False,
-):
+def _design_primers_api(template: str, p3_args: dict) -> dict:
+    """
+    primer3-py has had API naming differences depending on version.
+    Prefer bindings.design_primers, fall back to bindings.designPrimers.
+    """
+    bindings = primer3.bindings
+    if hasattr(bindings, "design_primers"):
+        return bindings.design_primers({"SEQUENCE_ID": "template", "SEQUENCE_TEMPLATE": template}, p3_args)
+    return bindings.designPrimers({"SEQUENCE_ID": "template", "SEQUENCE_TEMPLATE": template}, p3_args)
+
+
+def _pick_single_primer(seq_template: str, which: str, rounds: list, max_end_gc: int = 3, show_reason: bool = False):
     """
     Try multiple parameter rounds to pick a single primer with primer3.
-
-    which: 'left' (forward on template) or 'right' (reverse on template).
-
-    Enforces:
-      - Primer3 GC clamp (consecutive G/C at 3' end) via PRIMER_GC_CLAMP
-      - Max consecutive G/C at 3' end via post-filter (<= max_end_gc)
     """
     which = which.lower()
     assert which in ("left", "right")
 
     last_res = None
-
     for ridx, rd in enumerate(rounds, start=1):
         p3_args = {
             "PRIMER_OPT_SIZE": rd["size_opt"],
@@ -693,16 +677,13 @@ def _pick_single_primer(
             "PRIMER_GC_CLAMP": rd["clamp_min"],
         }
 
-        res = primer3.bindings.design_primers(
-            {"SEQUENCE_ID": "template", "SEQUENCE_TEMPLATE": seq_template},
-            p3_args,
-        )
+        res = _design_primers_api(seq_template, p3_args)
         last_res = res
 
-        cand = []
         key_prefix = "PRIMER_LEFT" if which == "left" else "PRIMER_RIGHT"
         nret = int(res.get(f"{key_prefix}_NUM_RETURNED", 0) or 0)
 
+        cand = []
         for i in range(nret):
             seq = res[f"{key_prefix}_{i}_SEQUENCE"]
             tm = float(res.get(f"{key_prefix}_{i}_TM", float("nan")))
@@ -710,17 +691,14 @@ def _pick_single_primer(
             ln = len(seq)
 
             run_gc = _count_trailing_gc(seq)
-            if run_gc < rd["clamp_min"]:
-                continue
-            if run_gc > max_end_gc:
+            if run_gc < rd["clamp_min"] or run_gc > max_end_gc:
                 continue
 
             cand.append((seq, tm, gc, ln))
 
         if cand:
-            seq, tm, gc, ln = cand[0]  # primer3 sorts by objective
-            note = f"round{ridx} ({which})"
-            return seq, tm, gc, ln, note
+            seq, tm, gc, ln = cand[0]
+            return seq, tm, gc, ln, f"round{ridx} ({which})"
 
     return None, None, None, None, ("no primer found" if not show_reason else str(last_res))
 
@@ -728,23 +706,11 @@ def _pick_single_primer(
 # -----------------------------
 # Validation primers
 # -----------------------------
-def design_validation_primers(
-    gRNA_df: pd.DataFrame,
-    fasta_dict,
-    show_progress: bool = True,
-) -> pd.DataFrame:
+def design_validation_primers(gRNA_df: pd.DataFrame, fasta_dict, show_progress: bool = True) -> pd.DataFrame:
     """
     Design two gene-specific validation primers per row:
       PCR1: Forward primer 100–300 bp UPSTREAM of HAL (gene-oriented).
       PCR2: Reverse primer 100–300 bp DOWNSTREAM of HAR (gene-oriented).
-
-    Requires:
-      chromosome, feature, gene_strand, codon_start, codon_end, designable
-
-    Adds:
-      PCR1_forward_primer_seq / _Tm / _GC / _len
-      PCR2_reverse_primer_seq / _Tm / _GC / _len
-      warnings (appended)
     """
     rounds = [
         dict(tm_opt=60.0, tm_min=58.0, tm_max=62.0, gc_min=40.0, gc_max=60.0, size_opt=20, size_min=18, size_max=22, clamp_min=1, hairpin_max=24.0, poly_x_max=4),
@@ -761,7 +727,7 @@ def design_validation_primers(
     if missing:
         raise ValueError(f"design_validation_primers missing required columns: {missing}")
 
-    # Prepare output cols
+    # Output columns
     df["PCR1_forward_primer_seq"] = ""
     df["PCR1_forward_primer_Tm"] = np.nan
     df["PCR1_forward_primer_GC"] = np.nan
@@ -772,7 +738,6 @@ def design_validation_primers(
     df["PCR2_reverse_primer_GC"] = np.nan
     df["PCR2_reverse_primer_len"] = np.nan
 
-    # Mark skipped rows
     mask_bad = ~df["designable"]
     df.loc[mask_bad, "warnings"] = df.loc[mask_bad, "warnings"].apply(lambda w: _merge_warn(w, ["skipped: prefilter_designable"]))
 
@@ -797,7 +762,6 @@ def design_validation_primers(
 
         (HALs, HALe), (HARs, HARe) = _arm_ranges(feature, gene_strand, cs, ce)
 
-        # Windows around arms (genomic coords)
         if gene_strand == "+":
             up_start, up_end = HALs - 300, HALs - 100
             dn_start, dn_end = HARe + 100, HARe + 300
@@ -805,7 +769,6 @@ def design_validation_primers(
             up_start, up_end = HALe + 100, HALe + 300
             dn_start, dn_end = HARs - 300, HARs - 100
 
-        # prefilter_designable should guarantee these are in bounds
         if up_start < 1 or up_end > clen or dn_start < 1 or dn_end > clen or up_end < up_start or dn_end < dn_start:
             warn_msgs.append("Primer window out of contig despite designable=True (regression)")
             df.at[idx, "warnings"] = "; ".join(sorted(set(warn_msgs)))
