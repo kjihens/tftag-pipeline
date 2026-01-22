@@ -196,7 +196,7 @@ def run_pipeline(
     to_sqlite(
         candidates,
         basename,
-        outdir
+        outdir,
         output_table,
         if_exists="append",
         index=False,
