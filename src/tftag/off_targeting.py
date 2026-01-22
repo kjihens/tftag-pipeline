@@ -20,7 +20,7 @@ def enumerate_offtargets_cas_offinder(
     candidates: pd.DataFrame,
     genome_fasta_path: str,
     *,
-    out_dir: str = "out",
+    outdir: str = "out",
     run_id: str | None = None,
     cas_offinder_bin: str = "cas-offinder",
     device_spec: str = "C",
@@ -50,11 +50,11 @@ def enumerate_offtargets_cas_offinder(
         cols = ["spacer", "n_hits"] + [f"n_mm{k}" for k in range(mismatches + 1)]
         return pd.DataFrame(), pd.DataFrame(columns=cols)
 
-    os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(outdir, exist_ok=True)
     prefix = run_id or "run"
 
-    inp_path = os.path.join(out_dir, f"{prefix}_cas_offinder_input.txt")
-    out_path = os.path.join(out_dir, f"{prefix}_cas_offinder_hits.txt")
+    inp_path = os.path.join(outdir, f"{prefix}_cas_offinder_input.txt")
+    out_path = os.path.join(outdir, f"{prefix}_cas_offinder_hits.txt")
 
     inp = offtarget.write_cas_offinder_input(
         candidates,

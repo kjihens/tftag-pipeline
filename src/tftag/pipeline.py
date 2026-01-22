@@ -134,7 +134,7 @@ def run_pipeline(
         _hits, spec = enumerate_offtargets_cas_offinder(
             candidates,
             genome_fasta_path,
-            out_dir=out_dir,
+            outdir=outdir,
             run_id=run_id,
             cas_offinder_bin=cas_offinder_bin,
             device_spec=device_spec,
