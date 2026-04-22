@@ -142,7 +142,7 @@ def main():
     )
 
     # Selection
-    ap.add_argument("--selection", choices=["all", "closest", "mismatch"], default="all", help="Return all guides, or select one guide per gene per terminus (start/stop)")
+    ap.add_argument("--selection", choices=["all", "closest", "rs3"], default="all", help="Return all guides, or select one guide per gene per terminus (start/stop)")
 
     args = ap.parse_args()
 
@@ -174,7 +174,7 @@ def main():
         protospacer_overlap_len=args.protospacer_overlap_len,
         write_csv=args.write_csv,
         write_parquet=args.write_parquet,
-        stock_vcfs=args.stock_vcf,
+        stock_vcfs=stock_vcfs,
         chrom_to_stock=chrom_to_stock,
         check_stock_vcf_compatibility=args.check_stock_vcf_compatibility,
         check_stock_variants=args.check_stock_variants,

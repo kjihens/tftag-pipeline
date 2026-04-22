@@ -24,7 +24,7 @@ import uuid
 import numpy as np
 import pandas as pd
 
-from . import annotate, scan, efficiency, design
+from . import annotate, scan, efficiency, design, stockcheck
 from .genome_io import create_GTF_db, load_fasta_dict
 from .storage import to_sqlite
 from .select import select_one_per_tag
@@ -58,6 +58,10 @@ def run_pipeline(
     selection: str = "all",  # all|closest|mismatch
     write_csv: bool = True,
     write_parquet: bool = True,
+    stock_vcfs: dict[str, str] | None = None,
+    chrom_to_stock: dict[str, str] | None = None,
+    check_stock_vcf_compatibility: bool = False,
+    check_stock_variants: bool = False,
 ) -> None:
     """
     Run the TFTag pipeline.
@@ -74,8 +78,8 @@ def run_pipeline(
       - -1: strict uniqueness (mm0==1 and all other n_mm* == 0)
         Note: “strict” is only as strict as the `mismatches` you searched (e.g. mismatches=4).
     """
-    if per_tag not in ("all", "closest", "rs3"):
-        raise ValueError("per_tag must be one of: all, closest, rs3")
+    if selection not in ("all", "closest", "rs3"):
+        raise ValueError("selection must be one of: all, closest, rs3")
     if mismatches < 0:
         raise ValueError("mismatches must be >= 0")
 
@@ -101,6 +105,45 @@ def run_pipeline(
 
     # Load genome FASTA
     fasta_dict = load_fasta_dict(genome_fasta_path)
+
+    # Do vcf check
+    stock_vcfs = stock_vcfs or {}
+    chrom_to_stock = chrom_to_stock or {}
+
+    if check_stock_vcf_compatibility and not stock_vcfs:
+        raise ValueError("No stock VCFs supplied. Use --stock_vcf NAME=PATH.")
+
+    if check_stock_variants and not stock_vcfs:
+        raise ValueError("Stock variant checking requested, but no stock VCFs were supplied.")
+
+    if check_stock_variants and not chrom_to_stock:
+        raise ValueError("Stock variant checking requested, but no chromosome-to-stock mapping was supplied.")
+    
+    if check_stock_vcf_compatibility:
+        print("Checking stock VCF compatibility with reference FASTA...")
+        for stock_name, vcf_path in stock_vcfs.items():
+            summary = stockcheck.check_vcf_reference_compatibility(
+                vcf_path=vcf_path,
+                fasta_path=genome_fasta_path,
+                max_records=10000,
+            )
+
+            print(f"\nStock: {stock_name}")
+            print(f"  VCF: {summary['vcf_path']}")
+            print(f"  Records checked: {summary['n_records_checked']}")
+            print(f"  REF mismatches: {summary['n_ref_mismatches']}")
+
+            if summary["contigs_only_in_vcf"]:
+                print(f"  Contigs only in VCF: {summary['contigs_only_in_vcf']}")
+            if summary["contigs_only_in_fasta"]:
+                print(f"  Contigs only in FASTA: {summary['contigs_only_in_fasta']}")
+            if summary["length_mismatches"]:
+                print(f"  Length mismatches: {summary['length_mismatches']}")
+            if summary["mismatch_examples"]:
+                print("  REF mismatch examples:")
+                for ex in summary["mismatch_examples"]:
+                    print(f"    {ex}")
+
 
     # Resolve genes list
     genes_list = parse_genes_arg(genes)
@@ -163,7 +206,7 @@ def run_pipeline(
             return
 
     # If selecting one per tag, do it BEFORE expensive primer3 work.
-    if per_tag != "all":
+    if selection != "all":
         candidates = select_one_per_tag(candidates, mode=selection)
         if candidates.empty:
             print("No guides remain after per-tag selection.")
