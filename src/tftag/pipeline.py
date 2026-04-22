@@ -144,7 +144,10 @@ def run_pipeline(
                 for ex in summary["mismatch_examples"]:
                     print(f"    {ex}")
 
-
+    if check_stock_vcf_compatibility and not check_stock_variants:
+        print("Stock VCF compatibility check completed.")
+        return
+    
     # Resolve genes list
     genes_list = parse_genes_arg(genes)
     if genes_list is None:
