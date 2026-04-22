@@ -6,6 +6,7 @@ dependencies:
   - pandas
   - numpy
   - biopython
+  - pysam
   - gffutils
   - tqdm
   - primer3-py
