@@ -41,7 +41,7 @@ def select_one_per_tag(df: pd.DataFrame, mode: str = "all") -> pd.DataFrame:
     df:
       Candidate guide table.
     mode:
-      "all" | "closest" | "rs3"
+      "all" | "closest" | "offtarget"
 
     Returns
     -------
@@ -51,8 +51,8 @@ def select_one_per_tag(df: pd.DataFrame, mode: str = "all") -> pd.DataFrame:
     if df.empty or mode == "all":
         return df
 
-    if mode not in ("closest", "rs3"):
-        raise ValueError("mode must be one of: all, closest, rs3")
+    if mode not in ("closest", "offtarget"):
+        raise ValueError("mode must be one of: all, closest, offtarget")
 
     # --- Grouping columns (enforce your requirement: 1 of N1, 1 of N2, etc.) ---
     if "tag" not in df.columns:
@@ -82,7 +82,7 @@ def select_one_per_tag(df: pd.DataFrame, mode: str = "all") -> pd.DataFrame:
     if mode == "closest":
         sort_cols += ["cut_distance", "rs3_score"]
         ascending += [True, False]
-    else:  # mode == "rs3"
+    else:  # mode == "offtarget"
         sort_cols += ["rs3_score", "cut_distance"]
         ascending += [False, True]
 

@@ -55,7 +55,7 @@ def run_pipeline(
     # Filtering: None/0 = no filter; 2 => require n_mm0==1 and n_mm1==0; -1 => strict uniqueness (within searched mm space)
     min_offtarget_mismatch: int | None = 0,
     # Selection / outputs
-    per_tag: str = "all",  # all|closest|rs3
+    selection: str = "all",  # all|closest|mismatch
     write_csv: bool = True,
     write_parquet: bool = True,
 ) -> None:
@@ -164,7 +164,7 @@ def run_pipeline(
 
     # If selecting one per tag, do it BEFORE expensive primer3 work.
     if per_tag != "all":
-        candidates = select_one_per_tag(candidates, mode=per_tag)
+        candidates = select_one_per_tag(candidates, mode=selection)
         if candidates.empty:
             print("No guides remain after per-tag selection.")
             return
@@ -185,7 +185,7 @@ def run_pipeline(
 
     # If per_tag == "all", selection happens here (no-op) to keep output deterministic.
     # This also supports the case where per_tag == "all" but you still want the function to exist here.
-    candidates = select_one_per_tag(candidates, mode=per_tag)
+    candidates = select_one_per_tag(candidates, mode=selection)
 
     # Add provenance
     candidates["run_id"] = run_id
