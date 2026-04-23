@@ -344,7 +344,8 @@ def add_homology_arms(
             work.at[idx, "warnings"] = _merge_warn(work.at[idx, "warnings"], warns)
 
     out = df.copy()
-    out.update(work)
+    for col in work.columns:
+        out[col] = work[col]
     return out
 
 
