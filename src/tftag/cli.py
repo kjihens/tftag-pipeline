@@ -110,7 +110,7 @@ def main():
     # Guide scanning
     ap.add_argument("--pam_up", type=int, default=30, help="bp upstream of codon to scan for PAMs.")
     ap.add_argument("--pam_down", type=int, default=30, help="bp downstream of codon to scan for PAMs.")
-    ap.add_argument("--protospacer_overlap_len", type=int, default=0, help="Length of overlap (in bp) allowed between protospacer and coding sequence.")
+    ap.add_argument("--protospacer_overlap_len", type=int, default=13, help="Length of overlap (in bp) allowed between protospacer and coding sequence.")
     
     # RS3 efficiency scoring
     ap.add_argument("--tracr", default="Hsu2013", help="RS3 tracrRNA model identifier.")
@@ -140,9 +140,9 @@ def main():
             "Annotate candidate guides against the relevant stock VCF for the chromosome."
         )
     )
-
     # Selection
     ap.add_argument("--selection", choices=["all", "closest", "rs3"], default="all", help="Return all guides, or select one guide per gene per terminus (start/stop)")
+    ap.add_argument("--stock_identical_only", action="store_true", help="Keep only guides whose full 23-mer target sequence is identical between reference and assigned stock.")
 
     args = ap.parse_args()
 
@@ -178,6 +178,7 @@ def main():
         chrom_to_stock=chrom_to_stock,
         check_stock_vcf_compatibility=args.check_stock_vcf_compatibility,
         check_stock_variants=args.check_stock_variants,
+        stock_identical_only=args.stock_identical_only,
     )
     return 0
 
