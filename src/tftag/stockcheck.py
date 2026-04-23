@@ -1,21 +1,38 @@
 """
 Stock-aware variant checks for TFTag.
 
-Design principles:
------------------
-- Work directly on the 23-mer target sequence
-- Reject guides if PAM GG is mutated
-- Ignore mutation in PAM "N"
-- Report all other mutations
-- Optionally filter to exact matches only
+Purpose
+-------
+Given a reference-designed gRNA (23-mer: 20 bp protospacer + NGG PAM),
+reconstruct the corresponding sequence in a *specific injection stock*
+(using its VCF), and assess whether the guide is still valid.
+
+Core rules
+----------
+1. If either G in the PAM (NGG) is mutated → guide is rejected.
+2. Mutation in PAM "N" is ignored.
+3. Mutations in the protospacer (positions 1–20) are reported.
+4. Optionally, require exact identity between reference and stock.
+
+Key assumption
+--------------
+The guides_df contains *reference-derived* coordinates and sequences,
+and we reconstruct the stock sequence by applying VCF variants on top
+of the reference genome.
+
+Coordinate conventions
+----------------------
+- All genomic coordinates are 1-based inclusive.
+- pysam uses 0-based half-open intervals → we convert carefully.
 """
 
 from __future__ import annotations
 
-from typing import Dict, Any, List
 import os
-import pysam
+from typing import Dict, Any, List
+
 import pandas as pd
+import pysam
 from tqdm.auto import tqdm
 
 from .utils import revcomp
@@ -30,6 +47,16 @@ def check_vcf_reference_compatibility(
     fasta_path: str,
     max_records: int | None = 10000,
 ) -> dict:
+    """
+    Sanity check: does the VCF match the reference FASTA?
+
+    This verifies:
+    - contig naming overlap
+    - contig length consistency
+    - REF alleles match the FASTA
+
+    This is *critical* before doing any variant-based reconstruction.
+    """
     vcf = pysam.VariantFile(vcf_path)
     fasta = pysam.FastaFile(fasta_path)
 
@@ -40,6 +67,7 @@ def check_vcf_reference_compatibility(
     contigs_only_in_vcf = sorted(set(vcf_contigs) - fasta_refs)
     contigs_only_in_fasta = sorted(fasta_refs - set(vcf_contigs))
 
+    # detect length mismatches for shared contigs
     length_mismatches = []
     for contig in sorted(set(vcf_contigs).intersection(fasta_refs)):
         vcf_len = vcf.header.contigs[contig].length
@@ -51,6 +79,7 @@ def check_vcf_reference_compatibility(
     n_ref_mismatches = 0
     mismatch_examples = []
 
+    # check REF allele correctness
     for rec in vcf:
         if rec.contig not in fasta_refs:
             continue
@@ -82,33 +111,35 @@ def check_vcf_reference_compatibility(
         "mismatch_examples": mismatch_examples,
     }
 
+
 def ensure_fetchable_vcf(vcf_path: str) -> None:
     """
-    Require a bgzipped + tabix-indexed VCF for interval queries.
+    Enforce that VCF supports interval queries (required for performance).
+
+    Requirements:
+    - bgzipped (.vcf.gz)
+    - tabix (.tbi) or CSI index
+
+    Without this, per-guide variant lookup would be prohibitively slow.
     """
     if not vcf_path.endswith(".vcf.gz"):
         raise ValueError(
-            f"Stock VCF {vcf_path!r} must be bgzipped (.vcf.gz) for interval queries. "
+            f"Stock VCF {vcf_path!r} must be bgzipped (.vcf.gz). "
             f"Convert with: bgzip -c input.vcf > input.vcf.gz"
         )
 
     tbi_path = vcf_path + ".tbi"
     csi_path = vcf_path + ".csi"
+
     if not (os.path.exists(tbi_path) or os.path.exists(csi_path)):
         raise ValueError(
-            f"Stock VCF {vcf_path!r} is missing a tabix/csi index. "
-            f"Create one with: tabix -p vcf {vcf_path}"
+            f"Stock VCF {vcf_path!r} is missing index. "
+            f"Run: tabix -p vcf {vcf_path}"
         )
 
-    try:
-        vcf = pysam.VariantFile(vcf_path)
-        # just touching header/contigs is enough to verify it opens
-        _ = list(vcf.header.contigs.keys())[:1]
-    except Exception as e:
-        raise ValueError(
-            f"Could not open indexed stock VCF {vcf_path!r}: {type(e).__name__}: {e}"
-        ) from e
-    
+    # quick open test
+    pysam.VariantFile(vcf_path)
+
 
 # ---------------------------------------------------------------------
 # Core sequence reconstruction
@@ -120,18 +151,25 @@ def _apply_variants_to_interval(
     chrom: str,
     start: int,
     end: int,
-) -> tuple[str, List[dict]]:
+) -> tuple[str, List[dict[str, Any]]]:
     """
-    Reconstruct stock sequence across interval [start, end] (1-based inclusive).
+    Reconstruct sequence for [start, end] by applying VCF variants.
 
-    Simplified genotype handling:
-    - 1/1 -> apply ALT
-    - 0/1 -> apply ALT (conservative)
-    - 0/0 -> keep REF
+    Strategy:
+    - Walk through overlapping VCF records
+    - Stitch together:
+        reference segments + variant alleles
+    - Return:
+        - reconstructed sequence (reference orientation)
+        - list of variant metadata
+
+    Simplifications:
+    - Heterozygous (0/1) treated as ALT (conservative)
+    - Only first ALT allele used
     """
 
     ref_seq = fasta.fetch(chrom, start - 1, end).upper()
-    variants = []
+    variants: List[dict[str, Any]] = []
 
     records = []
     for rec in vcf.fetch(chrom, start - 1, end):
@@ -144,29 +182,30 @@ def _apply_variants_to_interval(
     if not records:
         return ref_seq, variants
 
-    pieces = []
+    pieces: list[str] = []
     cursor = start
 
     for rec in sorted(records, key=lambda r: r.pos):
-
         rec_start = rec.pos
         rec_end = rec.pos + len(rec.ref) - 1
 
-        # add reference segment before variant
+        # add untouched region before variant
         if cursor < rec_start:
             pieces.append(fasta.fetch(chrom, cursor - 1, rec_start - 1).upper())
 
-        # genotype handling
         sample = next(iter(rec.samples.values())) if rec.samples else None
         gt = sample.get("GT") if sample else None
 
         alt = None
-        if gt is None:
-            pass
-        elif gt == (0, 0):
-            pass
-        elif 1 in gt:
+        gt_label = "NA"
+
+        if gt == (0, 0):
+            gt_label = "0/0"
+        elif gt and 1 in gt:
             alt = rec.alts[0] if rec.alts else None
+            gt_label = "/".join(str(x) for x in gt)
+        else:
+            gt_label = str(gt)
 
         if alt is None:
             pieces.append(rec.ref.upper())
@@ -176,11 +215,13 @@ def _apply_variants_to_interval(
         variants.append({
             "pos": rec.pos,
             "ref": rec.ref.upper(),
-            "alt": ",".join(str(a) for a in (rec.alts or [])),
+            "alt": ",".join(str(a).upper() for a in (rec.alts or [])),
+            "gt": gt_label,
         })
 
         cursor = rec_end + 1
 
+    # trailing reference
     if cursor <= end:
         pieces.append(fasta.fetch(chrom, cursor - 1, end).upper())
 
@@ -188,7 +229,39 @@ def _apply_variants_to_interval(
 
 
 def _orient_to_guide(seq: str, strand: str) -> str:
-    return seq if strand == "+" else revcomp(seq)
+    """
+    Convert reference-oriented sequence into guide orientation.
+
+    Important:
+    - guides are defined in their own 5'→3' orientation
+    - minus-strand guides require reverse-complement
+    """
+    if strand == "+":
+        return seq
+    if strand == "-":
+        return revcomp(seq)
+    raise ValueError(f"Invalid grna_strand: {strand!r}")
+
+
+def _guide_interval_23mer(row) -> tuple[int, int]:
+    """
+    Compute genomic span of the full 23-mer.
+
+    For + strand:
+        protospacer ----> PAM
+    For - strand:
+        PAM <---- protospacer
+
+    Therefore:
+    + : start = protospacer_start, end = pam_end
+    - : start = pam_start, end = protospacer_end
+    """
+    strand = row["grna_strand"]
+    if strand == "+":
+        return int(row["protospacer_start"]), int(row["pam_end"])
+    if strand == "-":
+        return int(row["pam_start"]), int(row["protospacer_end"])
+    raise ValueError(f"Invalid grna_strand: {strand!r}")
 
 
 # ---------------------------------------------------------------------
@@ -197,29 +270,40 @@ def _orient_to_guide(seq: str, strand: str) -> str:
 
 def _pam_gg_mutated(ref23: str, stock23: str) -> bool:
     """
-    Reject if either G in NGG is mutated.
-    Positions:
-      21 = N
-      22 = G
-      23 = G
+    Critical rule: if PAM GG is mutated → guide will not cut.
+
+    Positions (1-based):
+        21 = N
+        22 = G
+        23 = G
     """
+    if len(ref23) != 23 or len(stock23) != 23:
+        return True
     return (ref23[21] != stock23[21]) or (ref23[22] != stock23[22])
 
 
 def _nonpam_mutated(ref23: str, stock23: str) -> bool:
     """
-    Only consider protospacer (positions 1–20).
-    Ignore PAM entirely.
+    Detect mutations in protospacer only (positions 1–20).
     """
+    if len(ref23) != 23 or len(stock23) != 23:
+        return True
     return ref23[:20] != stock23[:20]
 
 
 def _diff_positions(ref23: str, stock23: str) -> str:
-    out = []
-    for i, (r, s) in enumerate(zip(ref23, stock23), start=1):
-        if r != s:
-            out.append(f"{i}:{r}>{s}")
-    return ";".join(out)
+    """
+    Return human-readable mutation summary:
+    e.g. "5:A>G;17:C>T"
+    """
+    if len(ref23) != len(stock23):
+        return f"length:{len(ref23)}>{len(stock23)}"
+
+    return ";".join(
+        f"{i}:{r}>{s}"
+        for i, (r, s) in enumerate(zip(ref23, stock23), start=1)
+        if r != s
+    )
 
 
 # ---------------------------------------------------------------------
@@ -233,7 +317,15 @@ def annotate_stock_variants(
     reference_fasta_path: str,
     show_progress: bool = True,
 ) -> pd.DataFrame:
+    """
+    Main entry point.
 
+    For each guide:
+    1. Determine which stock applies (chromosome → stock mapping)
+    2. Reconstruct the 23-mer sequence in that stock
+    3. Compare against reference
+    4. Annotate mutation properties
+    """
     df = guides_df.copy()
 
     fasta = pysam.FastaFile(reference_fasta_path)
@@ -249,56 +341,41 @@ def annotate_stock_variants(
         iterator = tqdm(iterator, total=len(df), desc="Stock annotation", leave=False)
 
     for _, row in iterator:
-
         chrom = row["chromosome"]
-        strand = row["gRNA_strand"]
-        ref23 = str(row["gRNA_seq"]).upper()
+        strand = row["grna_strand"]
+        ref23 = str(row["grna_seq_23"]).upper()
 
         stock_name = chrom_to_stock.get(chrom)
 
         if stock_name is None:
-            records.append({
-                "stock_name": None,
-                "stock_seq_23": "",
-                "stock_seq_matches_ref": False,
-                "stock_pam_gg_mutated": False,
-                "stock_nonpam_mutated": False,
-                "stock_variant_positions": "",
-                "stock_variant_descriptions": "",
-                "stock_check_status": "no_stock_for_chromosome",
-            })
+            records.append({"stock_check_status": "no_stock_for_chromosome"})
             continue
 
         vcf = vcf_by_stock.get(stock_name)
+        if vcf is None:
+            records.append({"stock_check_status": "stock_vcf_not_loaded"})
+            continue
 
-        start = int(row["gRNA_start"])
-        end = int(row["gRNA_end"])
+        start, end = _guide_interval_23mer(row)
 
         stock_ref, vars_meta = _apply_variants_to_interval(
-            vcf,
-            fasta,
-            chrom,
-            start,
-            end,
+            vcf, fasta, chrom, start, end
         )
 
         stock23 = _orient_to_guide(stock_ref, strand)
 
-        exact = stock23 == ref23
-        pam_bad = _pam_gg_mutated(ref23, stock23)
-        nonpam = _nonpam_mutated(ref23, stock23)
-
         records.append({
             "stock_name": stock_name,
             "stock_seq_23": stock23,
-            "stock_seq_matches_ref": exact,
-            "stock_pam_gg_mutated": pam_bad,
-            "stock_nonpam_mutated": nonpam,
+            "stock_seq_matches_ref": stock23 == ref23,
+            "stock_pam_gg_mutated": _pam_gg_mutated(ref23, stock23),
+            "stock_nonpam_mutated": _nonpam_mutated(ref23, stock23),
             "stock_variant_positions": _diff_positions(ref23, stock23),
             "stock_variant_descriptions": ";".join(
-                f"{v['pos']}:{v['ref']}>{v['alt']}" for v in vars_meta
+                f"{v['pos']}:{v['ref']}>{v['alt']}({v['gt']})"
+                for v in vars_meta
             ),
-            "stock_check_status": "ok",
+            "stock_check_status": "ok" if len(stock23) == len(ref23) else "length_changed",
         })
 
     ann = pd.DataFrame(records)
