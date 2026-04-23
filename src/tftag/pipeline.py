@@ -55,13 +55,14 @@ def run_pipeline(
     # Filtering: None/0 = no filter; 2 => require n_mm0==1 and n_mm1==0; -1 => strict uniqueness (within searched mm space)
     min_offtarget_mismatch: int | None = 0,
     # Selection / outputs
-    selection: str = "all",  # all|closest|mismatch
+    selection: str = "all",  # all|closest|rs3
     write_csv: bool = True,
     write_parquet: bool = True,
     stock_vcfs: dict[str, str] | None = None,
     chrom_to_stock: dict[str, str] | None = None,
     check_stock_vcf_compatibility: bool = False,
     check_stock_variants: bool = False,
+    stock_identical_only: bool = False,
 ) -> None:
     """
     Run the TFTag pipeline.
@@ -100,12 +101,6 @@ def run_pipeline(
 
     run_id = uuid.uuid4().hex[:12]
 
-    # Create/load GTF db
-    db = create_GTF_db(gtf_file, gtf_db_path)
-
-    # Load genome FASTA
-    fasta_dict = load_fasta_dict(genome_fasta_path)
-
     # Do vcf check
     stock_vcfs = stock_vcfs or {}
     chrom_to_stock = chrom_to_stock or {}
@@ -118,6 +113,10 @@ def run_pipeline(
 
     if check_stock_variants and not chrom_to_stock:
         raise ValueError("Stock variant checking requested, but no chromosome-to-stock mapping was supplied.")
+    
+    if check_stock_variants:
+        for stock_name, vcf_path in stock_vcfs.items():
+            stockcheck.ensure_fetchable_vcf(vcf_path)
     
     if check_stock_vcf_compatibility:
         print("Checking stock VCF compatibility with reference FASTA...")
@@ -134,9 +133,11 @@ def run_pipeline(
             print(f"  REF mismatches: {summary['n_ref_mismatches']}")
 
             if summary["contigs_only_in_vcf"]:
-                print(f"  Contigs only in VCF: {summary['contigs_only_in_vcf']}")
+                extra = summary["contigs_only_in_vcf"]
+                print(f"  Contigs only in VCF: {len(extra)} (first 10: {extra[:10]})")
             if summary["contigs_only_in_fasta"]:
-                print(f"  Contigs only in FASTA: {summary['contigs_only_in_fasta']}")
+                extra = summary["contigs_only_in_fasta"]
+                print(f"  Contigs only in FASTA: {len(extra)} (first 10: {extra[:10]})")
             if summary["length_mismatches"]:
                 print(f"  Length mismatches: {summary['length_mismatches']}")
             if summary["mismatch_examples"]:
@@ -148,6 +149,12 @@ def run_pipeline(
         print("Stock VCF compatibility check completed.")
         return
     
+    # Create/load GTF db
+    db = create_GTF_db(gtf_file, gtf_db_path)
+
+    # Load genome FASTA
+    fasta_dict = load_fasta_dict(genome_fasta_path)
+
     # Resolve genes list
     genes_list = parse_genes_arg(genes)
     if genes_list is None:
@@ -163,13 +170,42 @@ def run_pipeline(
     if candidates.empty:
         print("No candidate guides found.")
         return
+    
+    # Check variants in gRNA in stock lines (if requested)
+    if check_stock_variants:
+        print("Annotating candidate guides against stock VCFs...")
+        candidates = stockcheck.annotate_stock_variants(
+            guides_df=candidates,
+            stock_vcfs=stock_vcfs,
+            chrom_to_stock=chrom_to_stock,
+            reference_fasta_path=genome_fasta_path,
+            show_progress=True,
+        )
 
+        # hard reject if PAM GG is mutated
+        before = len(candidates)
+        candidates = candidates[~candidates["stock_pam_gg_mutated"]].copy()
+        removed = before - len(candidates)
+        if removed:
+            print(f"Removed {removed} guides with PAM GG mutation in assigned stock.")
+
+        if stock_identical_only:
+            before = len(candidates)
+            candidates = candidates[candidates["stock_seq_matches_ref"]].copy()
+            removed = before - len(candidates)
+            if removed:
+                print(f"Removed {removed} non-identical guides due to --stock_identical_only.")
+
+        if candidates.empty:
+            print("No guides remain after stock sequence filtering.")
+            return
+        
     # Prefilter feasibility (design-aware)
     candidates = design.prefilter_designable(candidates, fasta_dict, show_progress=True)
     if "designable" in candidates.columns and not candidates["designable"].any():
         print("No designable guides after prefilter.")
         return
-
+    
     # RS3 scoring
     candidates = efficiency.score_rs3(
         candidates, fasta_dict, tracrRNA=tracrRNA, batch_size=batch_size_rs3
@@ -228,10 +264,6 @@ def run_pipeline(
     candidates = design.apply_silent_edits(candidates, show_progress=True)
 
     candidates = design.validation_primers(candidates, fasta_dict, show_progress=True)
-
-    # If per_tag == "all", selection happens here (no-op) to keep output deterministic.
-    # This also supports the case where per_tag == "all" but you still want the function to exist here.
-    candidates = select_one_per_tag(candidates, mode=selection)
 
     # Add provenance
     candidates["run_id"] = run_id
