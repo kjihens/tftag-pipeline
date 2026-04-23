@@ -125,6 +125,7 @@ def main():
     ap.add_argument("--mismatches", type=int, default=4)
     ap.add_argument("--pam-pattern", default="NNNNNNNNNNNNNNNNNNNNNGG")
     ap.add_argument("--min-offtarget-mismatch", type=int, default=0, help="Minimum mismatch count allowed for off-target sites (e.g. 2 = allow ≥2 mismatches only).")
+    ap.add_argument("--offtarget_batch_size", type=int, default=500, help="Number of unique spacers per Cas-OFFinder batch.")
 
     # variant checking
     ap.add_argument("--stock_group", action="append", type=_parse_name_chroms, default=[], metavar="NAME=CHR1,CHR2,...", help=("Assign chromosomes to a named stock. Repeatable. Example: "
@@ -170,6 +171,7 @@ def main():
         mismatches=args.mismatches,
         pam_pattern=args.pam_pattern,
         min_offtarget_mismatch=args.min_offtarget_mismatch,
+        offtarget_batch_size=args.offtarget_batch_size,
         selection=args.selection,
         protospacer_overlap_len=args.protospacer_overlap_len,
         write_csv=args.write_csv,

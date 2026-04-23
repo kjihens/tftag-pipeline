@@ -1,6 +1,6 @@
 
 from __future__ import annotations
-import os, re, sqlite3
+import os, re, sqlite3, math
 import pandas as pd
 
 
@@ -15,43 +15,56 @@ def _validate_ident(x: str, what: str) -> str:
 
 
 def to_sqlite(
-    df: pd.DataFrame,
-    base_name: str,
-    outdir: str,
-    table: str,
-    if_exists: str = "append",
-    index: bool = False,
-    create_indices: bool = False,
-    chunksize: int = 5000,
-) -> None:
-    os.makedirs(outdir or ".", exist_ok=True)
-    table = _validate_ident(table, "table name")
+    df,
+    basename,
+    outdir,
+    table,
+    if_exists="append",
+    index=False,
+    create_indices=True,
+    chunksize=1000,
+):
+    os.makedirs(outdir, exist_ok=True)
+    db_path = os.path.join(outdir, basename + ".sqlite")
 
-    db_path = os.path.join(outdir, base_name + ".sqlite")
+    # SQLite has a limit on the number of variables in one statement.
+    # With method="multi", total bound vars ~= n_columns * chunksize.
+    ncols = len(df.columns) + (1 if index else 0)
+
+    # Conservative default for SQLite builds that use 999 variables.
+    max_sql_vars = 999
+
+    # Leave a bit of margin.
+    safe_chunksize = max(1, min(chunksize, max_sql_vars // max(1, ncols)))
 
     with sqlite3.connect(db_path) as conn:
-        cur = conn.cursor()
-        cur.execute("PRAGMA journal_mode=WAL;")
-        cur.execute("PRAGMA synchronous=NORMAL;")
-        cur.execute("PRAGMA temp_store=MEMORY;")
-
-        df.to_sql(table, conn, if_exists=if_exists, index=index, chunksize=chunksize, method="multi")
+        df.to_sql(
+            table,
+            conn,
+            if_exists=if_exists,
+            index=index,
+            chunksize=safe_chunksize,
+            method="multi",
+        )
 
         if create_indices:
-            # Create indices only for columns that exist.
-            idx_specs = [
-                ("gene_id", ["gene_id"]),
-                ("gene_symbol", ["gene_symbol"]),
-                ("tag", ["tag"]),
-                ("spacer", ["spacer"]),
-                ("coord", ["chromosome", "protospacer_start", "protospacer_end"]),
-                ("rs3", ["rs3_score"]),
-                ("cclmoff_max", ["cclmoff_max"]),
-            ]
-            for suffix, cols in idx_specs:
-                if all(c in df.columns for c in cols):
-                    idx_name = f"idx_{table}_{suffix}"
-                    cols_sql = ", ".join([f'"{c}"' for c in cols])
-                    cur.execute(f'CREATE INDEX IF NOT EXISTS "{idx_name}" ON "{table}"({cols_sql});')
+            cur = conn.cursor()
 
-        conn.commit()
+            # create indices only for columns that actually exist
+            existing = set(df.columns)
+
+            if "gene_symbol" in existing:
+                cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_gene_symbol ON {table}(gene_symbol);")
+            if "gene_id" in existing:
+                cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_gene_id ON {table}(gene_id);")
+            if "tag" in existing:
+                cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_tag ON {table}(tag);")
+            if {"chromosome", "grna_23_start", "grna_23_end"}.issubset(existing):
+                cur.execute(
+                    f"CREATE INDEX IF NOT EXISTS idx_{table}_coord "
+                    f"ON {table}(chromosome, grna_23_start, grna_23_end);"
+                )
+            if "rs3_score" in existing:
+                cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_rs3 ON {table}(rs3_score);")
+
+            conn.commit()

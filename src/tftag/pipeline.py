@@ -54,6 +54,7 @@ def run_pipeline(
     pam_pattern: str = "NNNNNNNNNNNNNNNNNNNNNGG",
     # Filtering: None/0 = no filter; 2 => require n_mm0==1 and n_mm1==0; -1 => strict uniqueness (within searched mm space)
     min_offtarget_mismatch: int | None = 0,
+    offtarget_batch_size: int = 500,
     # Selection / outputs
     selection: str = "all",  # all|closest|rs3
     write_csv: bool = True,
@@ -194,7 +195,6 @@ def run_pipeline(
     
     # Check variants in gRNA in stock lines (if requested)
     if check_stock_variants:
-        print(candidates.columns.tolist())
         print("Annotating candidate guides against stock VCFs...")
         candidates = stockcheck.annotate_stock_variants(
             guides_df=candidates,
@@ -251,6 +251,8 @@ def run_pipeline(
             device_spec=device_spec,
             mismatches=mismatches,
             pam_pattern=pam_pattern,
+            batch_size=offtarget_batch_size,
+            show_progress=True,
         )
         candidates = merge_specificity(candidates, spec, mismatches=mismatches)
 
@@ -330,7 +332,7 @@ def run_pipeline(
         basename,
         outdir,
         output_table,
-        if_exists="replace",
+        if_exists="append",
         index=False,
         create_indices=True,
     )

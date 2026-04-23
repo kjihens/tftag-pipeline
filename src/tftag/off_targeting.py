@@ -2,16 +2,18 @@
 Pipeline-level off-target utilities.
 
 Responsibilities
----------------
-- Run Cas-OFFinder once per pipeline run (not per guide row).
+----------------
+- Run Cas-OFFinder once per batch of unique spacers (not per guide row).
 - Parse hits and summarise mismatch-bin counts per *spacer*.
 - Merge the summary into the candidate table with consistent n_mm* columns.
 - Provide common filters (e.g., "no off-targets detected").
 """
 from __future__ import annotations
 
+import math
 import os
 import pandas as pd
+from tqdm.auto import tqdm
 
 from . import offtarget
 
@@ -26,9 +28,11 @@ def enumerate_offtargets_cas_offinder(
     device_spec: str = "C",
     mismatches: int = 4,
     pam_pattern: str = "NNNNNNNNNNNNNNNNNNNNNGG",
+    batch_size: int = 500,
+    show_progress: bool = True,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Run Cas-OFFinder and return:
+    Run Cas-OFFinder in batches and return:
       (hits_df, specificity_summary_df)
 
     Returns
@@ -44,33 +48,61 @@ def enumerate_offtargets_cas_offinder(
     -----
     - We summarise by *spacer* (20-nt) even if Cas-OFFinder queries were 23-mers.
     - n_mm0 is expected to be >= 1 for most guides (includes the on-target hit).
+    - Batching is used to provide a progress bar and avoid one giant monolithic run.
     """
     # Return empty but schema-consistent frames for downstream logic.
     if candidates.empty:
         cols = ["spacer", "n_hits"] + [f"n_mm{k}" for k in range(mismatches + 1)]
         return pd.DataFrame(), pd.DataFrame(columns=cols)
 
+    if batch_size < 1:
+        raise ValueError("batch_size must be >= 1")
+
     os.makedirs(outdir, exist_ok=True)
     prefix = run_id or "run"
 
-    inp_path = os.path.join(outdir, f"{prefix}_cas_offinder_input.txt")
-    out_path = os.path.join(outdir, f"{prefix}_cas_offinder_hits.txt")
+    # Cas-OFFinder only needs unique spacers as queries.
+    unique_guides = candidates[["spacer"]].drop_duplicates().reset_index(drop=True)
 
-    inp = offtarget.write_cas_offinder_input(
-        candidates,
-        genome_fasta_path,
-        pam_pattern=pam_pattern,
-        outfile=inp_path,
-        mismatches=mismatches,
-    )
-    out = offtarget.run_cas_offinder(
-        inp,
-        cas_offinder_bin=cas_offinder_bin,
-        device_spec=device_spec,
-        output_file=out_path,
-    )
+    n_guides = len(unique_guides)
+    n_batches = math.ceil(n_guides / batch_size)
 
-    hits = offtarget.parse_cas_offinder_output(out)
+    all_hits = []
+
+    batch_iter = range(n_batches)
+    if show_progress:
+        batch_iter = tqdm(batch_iter, total=n_batches, desc="Cas-OFFinder", leave=False)
+
+    for batch_idx in batch_iter:
+        start = batch_idx * batch_size
+        end = min((batch_idx + 1) * batch_size, n_guides)
+        chunk = unique_guides.iloc[start:end].copy()
+
+        inp_path = os.path.join(outdir, f"{prefix}_cas_offinder_input_batch{batch_idx:04d}.txt")
+        out_path = os.path.join(outdir, f"{prefix}_cas_offinder_hits_batch{batch_idx:04d}.txt")
+
+        inp = offtarget.write_cas_offinder_input(
+            chunk,
+            genome_fasta_path,
+            pam_pattern=pam_pattern,
+            outfile=inp_path,
+            mismatches=mismatches,
+        )
+        out = offtarget.run_cas_offinder(
+            inp,
+            cas_offinder_bin=cas_offinder_bin,
+            device_spec=device_spec,
+            output_file=out_path,
+        )
+
+        hits = offtarget.parse_cas_offinder_output(out)
+        if not hits.empty:
+            all_hits.append(hits)
+
+    if all_hits:
+        hits = pd.concat(all_hits, ignore_index=True)
+    else:
+        hits = pd.DataFrame()
 
     # IMPORTANT: mismatch bins must match the mismatches value used for the Cas-OFFinder run.
     spec = offtarget.summarize_specificity(hits, max_mismatches=mismatches)
