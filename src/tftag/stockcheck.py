@@ -13,6 +13,7 @@ Design principles:
 from __future__ import annotations
 
 from typing import Dict, Any, List
+import os
 import pysam
 import pandas as pd
 from tqdm.auto import tqdm
@@ -108,7 +109,7 @@ def ensure_fetchable_vcf(vcf_path: str) -> None:
             f"Could not open indexed stock VCF {vcf_path!r}: {type(e).__name__}: {e}"
         ) from e
     
-    
+
 # ---------------------------------------------------------------------
 # Core sequence reconstruction
 # ---------------------------------------------------------------------
