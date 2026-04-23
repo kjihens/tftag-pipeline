@@ -62,7 +62,11 @@ def enumerate_offtargets_cas_offinder(
     prefix = run_id or "run"
 
     # Cas-OFFinder only needs unique spacers as queries.
-    unique_guides = candidates[["spacer"]].drop_duplicates().reset_index(drop=True)
+    keep_cols = [c for c in ["spacer", "pam_seq", "grna_seq_23"] if c in candidates.columns]
+    if "spacer" not in keep_cols:
+        raise KeyError("Candidates must contain 'spacer' for off-target enumeration.")
+
+    unique_guides = candidates[keep_cols].drop_duplicates(subset=["spacer"]).reset_index(drop=True)
 
     n_guides = len(unique_guides)
     n_batches = math.ceil(n_guides / batch_size)
