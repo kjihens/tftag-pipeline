@@ -173,6 +173,7 @@ def run_pipeline(
     
     # Check variants in gRNA in stock lines (if requested)
     if check_stock_variants:
+        print(candidates.columns.tolist())
         print("Annotating candidate guides against stock VCFs...")
         candidates = stockcheck.annotate_stock_variants(
             guides_df=candidates,
