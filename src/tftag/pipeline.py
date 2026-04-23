@@ -288,45 +288,22 @@ def run_pipeline(
     candidates["gtf_db_path"] = gtf_db_path
     candidates["genome_fasta_path"] = genome_fasta_path
 
-    # Final output columns: keep useful selection/design information, drop internal construction fields
-    final_columns = [
-        "gene_id",
-        "gene_symbol",
-        "terminus",
-        "feature",
-        "tag",
-        "chromosome",
-        "gene_strand",
-        "codon_start",
-        "codon_end",
-        "grna_strand",
-        "grna_23_start",
-        "grna_23_end",
-        "grna_seq_23",
-        "cut_pos",
-        "cut_distance",
-        "rs3_score",
-        "n_hits",
-        "n_mm0",
-        "n_mm1",
-        "n_mm2",
-        "n_mm3",
-        "n_mm4",
-        "stock_name",
-        "stock_seq_23",
-        "stock_seq_matches_ref",
-        "stock_nonpam_mutated",
-        "stock_variant_positions",
-        "stock_variant_descriptions",
-        "warnings",
-        "run_id",
-        "gtf_db_path",
-        "genome_fasta_path",
+    # Final output columns: drop internal construction fields
+    drop_columns = [
+        "spacer",
+        "pam_seq",
+        "protospacer_start",
+        "protospacer_end",
+        "pam_start",
+        "pam_end",
+        "designable",
+        "skip_reason",
+        "stock_pam_gg_mutated",
     ]
 
-    # keep only columns that actually exist
-    final_columns = [c for c in final_columns if c in candidates.columns]
-    candidates = candidates[final_columns].copy()
+    drop_columns = [c for c in drop_columns if c in candidates.columns]
+    candidates = candidates.drop(columns=drop_columns)
+
 
     # Write SQLite
     to_sqlite(
