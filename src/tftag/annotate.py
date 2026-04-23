@@ -1,14 +1,14 @@
 """
 Annotation helpers for TFTag.
 
-What this module does
---------------------
-This module turns a set of gene IDs into a tidy "attribute table" with one row
+Purpose
+-------
+This module converts a set of gene IDs into a tidy "attribute table" with one row
 per annotated start_codon / stop_codon feature. That table is the biological
 starting point for the rest of the pipeline.
 
 For each terminus row, we record:
-- the gene ID and gene symbol
+- gene ID and gene symbol
 - whether it is an N- or C-terminus
 - genomic location and strand
 - a stable per-gene terminus tag (N1, N2, ..., C1, C2, ...)
@@ -17,22 +17,29 @@ For each terminus row, we record:
 
 Important interpretation notes
 ------------------------------
-1. "potential_readthrough" is a *structural annotation heuristic* based on the GTF.
+1. "potential_readthrough" is a structural annotation heuristic based on the GTF.
    It does NOT prove translational stop-codon readthrough.
-2. A terminus may be shared by multiple isoforms. We therefore explicitly annotate
-   transcript / isoform membership for each exact codon feature.
-3. Column names in this module are chosen to match the newer TFTag pipeline schema:
-     gene_id, gene_symbol, terminus, feature,
-     codon_start, codon_end, gene_strand, chromosome, tag, ...
+2. A terminus may be shared by multiple isoforms, so transcript / isoform
+   membership is explicitly annotated for each exact codon feature.
+3. This implementation does NOT assume that start_codon / stop_codon / CDS are
+   direct gffutils children of transcript features. Instead, it primarily matches
+   transcript membership via feature attributes such as transcript_id. This is
+   much more robust for standard GTFs.
 
-Expected input
---------------
-- `genes`: iterable of gene IDs resolvable in the gffutils database
-- `db`: a gffutils FeatureDB created from the annotation GTF/GFF
-
-Expected output
----------------
-A pandas DataFrame with one row per start/stop codon feature.
+Expected output columns
+-----------------------
+- gene_id
+- gene_symbol
+- terminus
+- feature
+- codon_start
+- codon_end
+- gene_strand
+- chromosome
+- tag
+- terminus_transcripts
+- terminus_isoforms
+- potential_readthrough
 """
 
 from __future__ import annotations
@@ -44,24 +51,24 @@ import gffutils
 
 
 # ---------------------------------------------------------------------
-# Transcript discovery helpers
+# Transcript / attribute helpers
 # ---------------------------------------------------------------------
 
 def _transcript_like_children(gene, db):
     """
     Return transcript-like children of a gene.
 
-    Why this exists
-    ---------------
+    Why this helper exists
+    ----------------------
     Different annotations do not always use the same feature type for transcripts.
-    Some use "transcript", others "mRNA", and some include ncRNA-style transcript
-    containers as well. We therefore try a broad but still sensible set first.
+    Some use 'transcript', others 'mRNA', and some include other transcript-like
+    containers. We therefore try a broad set first.
 
     Fallback behaviour
     ------------------
-    If no recognised transcript feature types are found, we fall back to direct
-    gene children that themselves have CDS/start_codon/stop_codon descendants.
-    That makes the code more robust to annotation idiosyncrasies.
+    If none of those types are found, we fall back to direct gene children that
+    themselves look transcript-like because they own CDS / start_codon / stop_codon
+    descendants.
     """
     tx_types = [
         "transcript",
@@ -78,8 +85,6 @@ def _transcript_like_children(gene, db):
     if txs:
         return txs
 
-    # Fallback for less standard annotations:
-    # take direct children that behave like transcript containers.
     out = []
     for child in db.children(gene, level=1, order_by="start"):
         has_cds = any(True for _ in db.children(child, featuretype="CDS"))
@@ -101,7 +106,7 @@ def _get_transcript_label(tx) -> str:
     3. transcript_id
     4. feature ID
 
-    For FlyBase-style annotations this often yields names like:
+    For FlyBase-style annotations this often yields labels like:
       dsx-RA, dsx-RB, ovo-RC
     """
     attrs = tx.attributes
@@ -113,19 +118,53 @@ def _get_transcript_label(tx) -> str:
 
 def _extract_isoform_suffix(tx_label: str) -> str:
     """
-    Extract a compact isoform suffix from a transcript label when possible.
+    Extract a compact FlyBase-style isoform suffix if present.
 
-    Typical Drosophila / FlyBase examples:
+    Examples
+    --------
       dsx-RA -> A
       dsx-RB -> B
       ovo-RC -> C
 
-    If the expected '-R...' pattern is not present, return the original label.
-    This is deliberate: we do not want to silently invent or lose information.
+    If the expected '-R...' pattern is absent, return the original label.
     """
     if "-R" in tx_label and len(tx_label.split("-R")[-1]) >= 1:
         return tx_label.split("-R")[-1]
     return tx_label
+
+
+def _feature_transcript_ids(feat) -> set[str]:
+    """
+    Extract transcript IDs from a feature's attributes.
+
+    Why this is important
+    ---------------------
+    Standard GTFs usually encode transcript membership through attributes such as
+    transcript_id, rather than through a strict parent-child tree that gffutils
+    can always traverse in the way we want.
+
+    We therefore use attribute-based matching whenever possible.
+
+    Supported keys
+    --------------
+    - transcript_id   : normal GTF
+    - Parent / parent : useful in some GFF-like files
+
+    Returns
+    -------
+    set[str]
+      Possibly empty set of transcript identifiers associated with the feature.
+    """
+    attrs = feat.attributes
+    ids = set()
+
+    for key in ("transcript_id", "Parent", "parent"):
+        vals = attrs.get(key, [])
+        for v in vals:
+            if v:
+                ids.add(str(v))
+
+    return ids
 
 
 # ---------------------------------------------------------------------
@@ -142,20 +181,26 @@ def _transcripts_with_exact_terminus(
     db,
 ) -> list[str]:
     """
-    Return all transcript labels for transcripts of a gene that contain
+    Return transcript labels for transcripts of a gene that contain
     this exact start_codon or stop_codon feature.
 
-    Exact matching criteria
-    -----------------------
-    We require equality of:
-    - feature type (start_codon or stop_codon)
-    - chromosome
-    - strand
-    - start
-    - end
+    Matching strategy
+    -----------------
+    We do NOT assume that codon features are direct children of transcript
+    features in the gffutils hierarchy. Instead, we:
 
-    This is important because a single gene can have multiple distinct N- or C-termini,
-    and multiple transcripts can share one exact terminus.
+    1. collect transcript-like children of the gene
+    2. map transcript IDs -> human-readable transcript labels
+    3. scan all matching codon features under the gene
+    4. use attribute transcript IDs to assign those codon features to transcripts
+
+    Exact matching criteria for the terminus itself
+    -----------------------------------------------
+    - same feature type (start_codon or stop_codon)
+    - same chromosome
+    - same strand
+    - same start
+    - same end
     """
     try:
         gene = db[gene_id]
@@ -163,20 +208,34 @@ def _transcripts_with_exact_terminus(
         return []
 
     txs = _transcript_like_children(gene, db)
-    matches = []
+    if not txs:
+        return []
 
+    # Map any transcript-like identifier we can find to a readable label.
+    tx_id_to_label = {}
     for tx in txs:
-        for feat in db.children(tx, featuretype=feature, order_by="start"):
-            if (
-                feat.seqid == chrom
-                and feat.strand == strand
-                and int(feat.start) == int(codon_start)
-                and int(feat.end) == int(codon_end)
-            ):
-                matches.append(_get_transcript_label(tx))
-                break
+        label = _get_transcript_label(tx)
+        tx_ids = _feature_transcript_ids(tx)
+        tx_ids.add(tx.id)  # fallback
+        for tid in tx_ids:
+            tx_id_to_label[tid] = label
 
-    return sorted(set(matches))
+    matches = set()
+
+    # Search codon features under the gene and map them back to transcripts via attributes.
+    for feat in db.children(gene, featuretype=feature, order_by="start"):
+        if (
+            feat.seqid == chrom
+            and feat.strand == strand
+            and int(feat.start) == int(codon_start)
+            and int(feat.end) == int(codon_end)
+        ):
+            feat_tx_ids = _feature_transcript_ids(feat)
+            for tid in feat_tx_ids:
+                if tid in tx_id_to_label:
+                    matches.add(tx_id_to_label[tid])
+
+    return sorted(matches)
 
 
 def add_terminus_isoform_columns(
@@ -255,9 +314,10 @@ def add_terminus_isoform_columns(
 # Readthrough-like structural heuristic
 # ---------------------------------------------------------------------
 
-def _collect_transcript_cds_and_stops(tx, db):
+def _collect_transcript_cds_and_stops(tx, gene, db):
     """
-    Collect basic CDS and stop-codon information for one transcript-like feature.
+    Collect CDS span and stop-codon annotations for one transcript-like feature
+    by matching transcript IDs in feature attributes.
 
     Returns
     -------
@@ -271,17 +331,30 @@ def _collect_transcript_cds_and_stops(tx, db):
       - cds_end
       - stop_sites (set of exact stop-codon intervals)
 
-    Why this is useful
+    Why this is needed
     ------------------
-    To identify C-termini that might be readthrough-like, we compare transcripts
-    of the same gene and ask whether one transcript terminates at a given stop
-    while another transcript has CDS continuation beyond it in gene orientation.
+    We cannot rely on transcript->child traversal for all GTFs, so we collect
+    all gene-descendant CDS / stop_codon features whose transcript_id attributes
+    match the transcript.
     """
-    cds_feats = list(db.children(tx, featuretype="CDS", order_by="start"))
+    tx_ids = _feature_transcript_ids(tx)
+    tx_ids.add(tx.id)  # fallback
+
+    cds_feats = []
+    stop_feats = []
+
+    for feat in db.children(gene, order_by="start"):
+        feat_tx_ids = _feature_transcript_ids(feat)
+        if not (tx_ids & feat_tx_ids):
+            continue
+
+        if feat.featuretype == "CDS":
+            cds_feats.append(feat)
+        elif feat.featuretype == "stop_codon":
+            stop_feats.append(feat)
+
     if not cds_feats:
         return None
-
-    stop_feats = list(db.children(tx, featuretype="stop_codon", order_by="start"))
 
     cds_start = min(f.start for f in cds_feats)
     cds_end = max(f.end for f in cds_feats)
@@ -330,7 +403,7 @@ def _is_potential_readthrough_for_stop(
 
     tx_info = []
     for tx in txs:
-        info = _collect_transcript_cds_and_stops(tx, db)
+        info = _collect_transcript_cds_and_stops(tx, gene, db)
         if info is None:
             continue
         if info["chromosome"] != chrom or info["strand"] != strand:
@@ -351,17 +424,16 @@ def _is_potential_readthrough_for_stop(
             continue
 
         if strand == "+":
-            # On + strand, "beyond stop" means downstream, i.e. larger coordinate.
+            # On + strand, "beyond stop" means larger coordinates.
             if t["cds_end"] <= stop_end:
                 continue
             extension = t["cds_end"] - stop_end
         else:
-            # On - strand, "beyond stop" in gene orientation means smaller coordinate.
+            # On - strand, "beyond stop" in gene orientation means smaller coordinates.
             if t["cds_start"] >= stop_start:
                 continue
             extension = stop_start - t["cds_start"]
 
-        # Require codon-compatible extension.
         if extension > 0 and extension % 3 == 0:
             return True
 
@@ -446,11 +518,11 @@ def build_attribute_table(genes: Iterable[str], db, *, verbose: bool = True) -> 
       Iterable of gene IDs to look up in the gffutils database.
 
     db:
-      gffutils DB handle (as returned by genome_io.create_GTF_db).
+      gffutils DB handle.
 
     verbose:
-      If True, print a short warning summary for missing genes and enable progress bars
-      for the more expensive annotation steps.
+      If True, print a short warning summary for missing genes and enable progress
+      bars for the more expensive annotation steps.
 
     Returns
     -------
@@ -463,9 +535,9 @@ def build_attribute_table(genes: Iterable[str], db, *, verbose: bool = True) -> 
     rows: list[dict] = []
     missing: list[str] = []
 
-    # -----------------------------------------------------------------
+    # -------------------------------------------------------------
     # Step 1: collect raw start/stop codon features gene by gene
-    # -----------------------------------------------------------------
+    # -------------------------------------------------------------
     for gene_id in tqdm(genes, desc="Fetch gene features", leave=False):
         try:
             gene = db[gene_id]
@@ -473,14 +545,13 @@ def build_attribute_table(genes: Iterable[str], db, *, verbose: bool = True) -> 
             missing.append(gene_id)
             continue
 
-        # Prefer a human-readable gene symbol/name if available.
+        # Prefer a readable gene symbol if available.
         gene_symbol = (
             (gene.attributes.get("gene_symbol") or gene.attributes.get("gene_name") or [None])[0]
         ) or gene_id
 
         for feat in db.children(gene, featuretype=["start_codon", "stop_codon"]):
             terminus = "N" if feat.featuretype == "start_codon" else "C"
-
             rows.append(
                 dict(
                     gene_id=gene_id,
@@ -496,25 +567,24 @@ def build_attribute_table(genes: Iterable[str], db, *, verbose: bool = True) -> 
 
     df = pd.DataFrame(rows)
 
-    # If nothing was found, return early after reporting missing genes if requested.
+    # Early exit if nothing was found.
     if df.empty:
         if verbose and missing:
             print(f"Warning: {len(missing)} genes not found in gffutils DB (showing first 10): {missing[:10]}")
         return df
 
-    # -----------------------------------------------------------------
+    # -------------------------------------------------------------
     # Step 2: de-duplicate and sort deterministically
-    # -----------------------------------------------------------------
-    # This is important because later per-gene numbering (N1, N2, C1, C2, ...)
-    # should be stable across runs.
+    # -------------------------------------------------------------
+    # Stable ordering is important because per-gene numbering below should be reproducible.
     df = df.drop_duplicates(["gene_id", "feature", "codon_start", "codon_end"])
     df = df.sort_values(
         ["gene_id", "terminus", "chromosome", "codon_start", "codon_end"]
     ).reset_index(drop=True)
 
-    # -----------------------------------------------------------------
+    # -------------------------------------------------------------
     # Step 3: assign stable per-gene terminus tags
-    # -----------------------------------------------------------------
+    # -------------------------------------------------------------
     # Example:
     #   gene X with two start codons -> N1, N2
     #   gene X with three stop codons -> C1, C2, C3
@@ -522,20 +592,25 @@ def build_attribute_table(genes: Iterable[str], db, *, verbose: bool = True) -> 
     df["tag"] = df["terminus"] + df["tag_number"].astype(str)
     df = df.drop(columns=["tag_number"])
 
-    # -----------------------------------------------------------------
+    # -------------------------------------------------------------
     # Step 4: annotate which isoforms share each exact terminus
-    # -----------------------------------------------------------------
+    # -------------------------------------------------------------
     df = add_terminus_isoform_columns(df, db, show_progress=verbose)
 
-    # -----------------------------------------------------------------
+    # -------------------------------------------------------------
     # Step 5: annotate potential readthrough-like C-termini
-    # -----------------------------------------------------------------
+    # -------------------------------------------------------------
     df = add_potential_readthrough_column(df, db, show_progress=verbose)
 
-    # -----------------------------------------------------------------
-    # Step 6: report missing gene IDs, if any
-    # -----------------------------------------------------------------
+    # -------------------------------------------------------------
+    # Step 6: report missing genes, if any
+    # -------------------------------------------------------------
     if verbose and missing:
         print(f"Warning: {len(missing)} genes not found in gffutils DB (showing first 10): {missing[:10]}")
+
+    # Optional lightweight sanity prints during development
+    # if verbose:
+    #     print("Readthrough candidates:", int(df["potential_readthrough"].sum()))
+    #     print("Termini with transcript assignments:", int((df["terminus_transcripts"] != "").sum()))
 
     return df
