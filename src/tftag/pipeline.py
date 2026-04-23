@@ -311,7 +311,7 @@ def run_pipeline(
         basename,
         outdir,
         output_table,
-        if_exists="append",
+        if_exists="replace",
         index=False,
         create_indices=True,
     )
