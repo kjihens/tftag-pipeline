@@ -359,19 +359,39 @@ def choose_arm_for_mutation(
     show_progress: bool = True,
 ) -> pd.DataFrame:
     """
-    Determine which arm (HAL/HAR) contains the "protected window":
-      PAM + N PAM-proximal protospacer bases.
+    Determine which arm (HAL/HAR) must be silently mutated to prevent re-cutting.
+
+    Rule:
+      An arm requires mutation only if it contains:
+        (1) the full PAM, and
+        (2) at least `protospacer_overlap_len` PAM-proximal protospacer bases.
+
+    Rationale:
+      If the donor arm does not contain the PAM, the HDR donor cannot recreate a
+      functional target site, so no mutation is needed in that arm.
 
     If coding_only=True:
-      - start_codon must edit HAR (coding downstream)
-      - stop_codon must edit HAL (coding upstream)
-      otherwise reject.
+      - start_codon designs are only allowed to mutate HAR
+      - stop_codon designs are only allowed to mutate HAL
+      If only the non-coding arm satisfies the rule, the guide is rejected.
     """
     df = gRNA_df.copy()
+
+    if protospacer_overlap_len < 1:
+        raise ValueError("protospacer_overlap_len must be >= 1")
+
     if "warnings" not in df.columns:
         df["warnings"] = "none"
 
-    for col, default in [("requires_edit_arm", "none"), ("rejected", False), ("reject_reason", "none")]:
+    for col, default in [
+        ("requires_edit_arm", "none"),
+        ("rejected", False),
+        ("reject_reason", "none"),
+        ("HAL_pam_in_arm", False),
+        ("HAR_pam_in_arm", False),
+        ("HAL_pam_proximal_overlap", 0),
+        ("HAR_pam_proximal_overlap", 0),
+    ]:
         if col not in df.columns:
             df[col] = default
 
@@ -383,11 +403,56 @@ def choose_arm_for_mutation(
     if show_progress:
         iterator = tqdm(iterator, total=len(work), desc="Choosing edit arm", leave=False)
 
+    def interval_contains(a_s: int, a_e: int, b_s: int, b_e: int) -> bool:
+        """Return True if interval A fully contains interval B."""
+        return a_s <= b_s and b_e <= a_e
+
+    def count_pam_proximal_spacer_bases_in_arm(
+        arm_s: int,
+        arm_e: int,
+        prot_s: int,
+        prot_e: int,
+        grna_strand: str,
+    ) -> int:
+        """
+        Count how many PAM-proximal protospacer bases are present contiguously in the arm.
+
+        For + strand guides:
+          protospacer is prot_s..prot_e and PAM is to the right,
+          so PAM-proximal bases are prot_e, prot_e-1, prot_e-2, ...
+
+        For - strand guides:
+          PAM is to the left,
+          so PAM-proximal bases are prot_s, prot_s+1, prot_s+2, ...
+        """
+        count = 0
+
+        if grna_strand == "+":
+            for pos in range(prot_e, prot_s - 1, -1):
+                if arm_s <= pos <= arm_e:
+                    count += 1
+                else:
+                    break
+        elif grna_strand == "-":
+            for pos in range(prot_s, prot_e + 1):
+                if arm_s <= pos <= arm_e:
+                    count += 1
+                else:
+                    break
+        else:
+            raise ValueError(f"Invalid grna_strand: {grna_strand!r}")
+
+        return count
+
     for row in iterator:
         idx = row.Index
 
         if pd.isna(getattr(row, "HALs", np.nan)) or pd.isna(getattr(row, "HARs", np.nan)):
             work.at[idx, "requires_edit_arm"] = "none"
+            work.at[idx, "warnings"] = _merge_warn(
+                work.at[idx, "warnings"],
+                ["Missing homology arm coordinates; cannot choose edit arm"],
+            )
             continue
 
         HALs, HALe = int(row.HALs), int(row.HALe)
@@ -396,44 +461,72 @@ def choose_arm_for_mutation(
         rowd = row._asdict()
         pam_s, pam_e = pam_coords(rowd)
         prot_s, prot_e = protospacer_coords(rowd)
-        if pam_s is None or prot_s is None:
+
+        if pam_s is None or pam_e is None or prot_s is None or prot_e is None:
             work.at[idx, "requires_edit_arm"] = "none"
-            work.at[idx, "warnings"] = _merge_warn(work.at[idx, "warnings"], ["Missing PAM/protospacer coords; cannot choose edit arm"])
+            work.at[idx, "warnings"] = _merge_warn(
+                work.at[idx, "warnings"],
+                ["Missing PAM/protospacer coordinates; cannot choose edit arm"],
+            )
             continue
 
         grna_strand = rowd.get("grna_strand") or rowd.get("gRNA_strand")
         if grna_strand not in ("+", "-"):
             work.at[idx, "requires_edit_arm"] = "none"
-            work.at[idx, "warnings"] = _merge_warn(work.at[idx, "warnings"], ["Missing/invalid grna_strand; cannot choose edit arm"])
+            work.at[idx, "warnings"] = _merge_warn(
+                work.at[idx, "warnings"],
+                ["Missing/invalid grna_strand; cannot choose edit arm"],
+            )
             continue
 
-        # Protected window is genomic coordinates; containment check is genomic.
-        if grna_strand == "+":
-            window_s = max(prot_e - (protospacer_overlap_len - 1), prot_s)
-            window_e = pam_e
+        # Does each arm contain the full PAM?
+        pam_in_HAL = interval_contains(HALs, HALe, pam_s, pam_e)
+        pam_in_HAR = interval_contains(HARs, HARe, pam_s, pam_e)
+
+        # How many PAM-proximal protospacer bases are present in each arm?
+        hal_overlap = (
+            count_pam_proximal_spacer_bases_in_arm(HALs, HALe, prot_s, prot_e, grna_strand)
+            if pam_in_HAL else 0
+        )
+        har_overlap = (
+            count_pam_proximal_spacer_bases_in_arm(HARs, HARe, prot_s, prot_e, grna_strand)
+            if pam_in_HAR else 0
+        )
+
+        work.at[idx, "HAL_pam_in_arm"] = pam_in_HAL
+        work.at[idx, "HAR_pam_in_arm"] = pam_in_HAR
+        work.at[idx, "HAL_pam_proximal_overlap"] = hal_overlap
+        work.at[idx, "HAR_pam_proximal_overlap"] = har_overlap
+
+        hal_requires = pam_in_HAL and (hal_overlap >= protospacer_overlap_len)
+        har_requires = pam_in_HAR and (har_overlap >= protospacer_overlap_len)
+
+        required_coding_arm = "HAR" if row.feature == "start_codon" else "HAL"
+
+        if hal_requires and har_requires:
+            work.at[idx, "requires_edit_arm"] = "none"
+            work.at[idx, "rejected"] = True
+            work.at[idx, "reject_reason"] = (
+                f"Internal error: both arms satisfy PAM+{protospacer_overlap_len}bp rule"
+            )
+            work.at[idx, "warnings"] = _merge_warn(
+                work.at[idx, "warnings"],
+                [f"Internal error: both arms satisfy PAM+{protospacer_overlap_len}bp rule"]
+            )
+        elif hal_requires:
+            target_arm = "HAL"
+        elif har_requires:
+            target_arm = "HAR"
         else:
-            window_s = pam_s
-            window_e = min(prot_s + (protospacer_overlap_len - 1), prot_e)
-
-        def contains(a_s, a_e, w_s, w_e):
-            return a_s <= w_s and w_e <= a_e
-
-        in_HAL = contains(HALs, HALe, window_s, window_e)
-        in_HAR = contains(HARs, HARe, window_s, window_e)
-
-        if in_HAL and in_HAR:
-            work.at[idx, "warnings"] = _merge_warn(work.at[idx, "warnings"], ["Internal error: edit window contained in both arms"])
             target_arm = "none"
-        else:
-            target_arm = "HAL" if in_HAL else ("HAR" if in_HAR else "none")
 
         work.at[idx, "requires_edit_arm"] = target_arm
 
-        if coding_only and target_arm != "none":
-            required_arm = "HAR" if row.feature == "start_codon" else "HAL"
-            if target_arm != required_arm:
-                work.at[idx, "rejected"] = True
-                work.at[idx, "reject_reason"] = f"requires edits in non-coding arm {target_arm} for {row.feature}; rejected"
+        if coding_only and target_arm != "none" and target_arm != required_coding_arm:
+            work.at[idx, "rejected"] = True
+            work.at[idx, "reject_reason"] = (
+                f"requires edits in non-coding arm {target_arm} for {row.feature}; rejected"
+            )
 
     out = df.copy()
     out.update(work)
