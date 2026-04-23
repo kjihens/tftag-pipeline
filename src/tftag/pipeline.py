@@ -163,6 +163,15 @@ def run_pipeline(
     # Build codon attribute table
     attribute = annotate.build_attribute_table(genes_list, db)
 
+    # --- Summary: genes and termini ---
+    n_genes = attribute["gene_id"].nunique()
+    n_termini = len(attribute)
+
+    if "terminus" in attribute.columns:
+        termini_counts = attribute["terminus"].value_counts().to_dict()
+    else:
+        termini_counts = {}
+
     # Scan for candidate guides
     candidates = scan.scan_for_guides(
         attribute, fasta_dict, window_up=pam_window_up, window_down=pam_window_down
@@ -223,6 +232,8 @@ def run_pipeline(
     if candidates.empty:
         print("No designable guides after prefilter.")
         return
+    
+
     
     # RS3 scoring
     candidates = efficiency.score_rs3(
@@ -299,6 +310,14 @@ def run_pipeline(
         "designable",
         "skip_reason",
         "stock_pam_gg_mutated",
+        "HALs",
+        "HARs",
+        "HALe",
+        "HARe",
+        "HAL_pam_in_arm",
+        "HAR_pam_in_arm",
+        "HAL_pam_proximal_overlap",
+        "HAR_pam_proximal_overlap",
     ]
 
     drop_columns = [c for c in drop_columns if c in candidates.columns]
@@ -329,3 +348,16 @@ def run_pipeline(
         print(f"   - {outdir + '/' + basename + '.parquet'}")
     if write_csv:
         print(f"   - {outdir + '/' + basename + '.csv'}")
+
+    print("\nInput summary:")
+    print(f"  Genes analysed: {n_genes}")
+    print(f"  Total termini: {n_termini}")
+
+    if termini_counts:
+        for term, count in sorted(termini_counts.items()):
+            print(f"    {term}-termini: {count}")
+    
+    print("\nPost-filter summary:")
+    print(f"  Candidate guides: {len(candidates)}")
+    print(f"  Genes covered: {candidates['gene_id'].nunique()}")
+    print(f"  Termini covered: {candidates[['gene_id','tag']].drop_duplicates().shape[0]}")

@@ -357,7 +357,7 @@ def choose_arm_for_mutation(
     protospacer_overlap_len: int = 13,
     coding_only: bool = True,
     show_progress: bool = True,
-    debug: bool = True,
+    debug: bool = False,
     debug_n: int = 20,
 ) -> pd.DataFrame:
     """
