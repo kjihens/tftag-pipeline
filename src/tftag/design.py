@@ -33,7 +33,6 @@ from Bio.Seq import Seq
 from tqdm import tqdm
 
 from .utils import get_sequence, clamp_range
-from .coords import pam_coords, protospacer_coords
 
 
 # -----------------------------
@@ -459,8 +458,8 @@ def choose_arm_for_mutation(
         HARs, HARe = int(row.HARs), int(row.HARe)
 
         rowd = row._asdict()
-        pam_s, pam_e = pam_coords(rowd)
-        prot_s, prot_e = protospacer_coords(rowd)
+        pam_s, pam_e = int(rowd["pam_start"]), int(rowd["pam_end"])
+        prot_s, prot_e = int(rowd["protospacer_start"]), int(rowd["protospacer_end"])
 
         if pam_s is None or pam_e is None or prot_s is None or prot_e is None:
             work.at[idx, "requires_edit_arm"] = "none"
@@ -607,8 +606,8 @@ def apply_silent_edits(gRNA_df: pd.DataFrame, show_progress: bool = True) -> pd.
             work.at[idx, "warnings"] = _merge_warn(work.at[idx, "warnings"], ["Missing/invalid grna_strand; cannot apply edits"])
             continue
 
-        pam_s, pam_e = pam_coords(rowd)
-        prot_s, prot_e = protospacer_coords(rowd)
+        pam_s, pam_e = int(rowd["pam_start"]), int(rowd["pam_end"])
+        prot_s, prot_e = int(rowd["protospacer_start"]), int(rowd["protospacer_end"])
         if pam_s is None or prot_s is None:
             work.at[idx, "warnings"] = _merge_warn(work.at[idx, "warnings"], ["Missing PAM/protospacer coords; cannot apply edits"])
             continue
