@@ -97,39 +97,38 @@ def _transcript_like_children(gene, db):
 
 def _get_transcript_label(tx) -> str:
     """
-    Return a human-readable transcript label if possible.
+    Return the most human-readable transcript label available.
 
-    Preference order
-    ----------------
-    1. transcript_name
-    2. Name
-    3. transcript_id
-    4. feature ID
-
-    For FlyBase-style annotations this often yields labels like:
-      dsx-RA, dsx-RB, ovo-RC
+    For FlyBase GTFs, transcript_symbol is the preferred label, e.g.:
+      Polr1B-RA
     """
     attrs = tx.attributes
-    return (
-        (attrs.get("transcript_name") or attrs.get("Name") or attrs.get("transcript_id") or [None])[0]
-        or tx.id
-    )
+
+    for key in ("transcript_symbol", "transcript_name", "Name", "symbol", "Alias"):
+        vals = attrs.get(key, [])
+        if vals and vals[0]:
+            return str(vals[0])
+
+    vals = attrs.get("transcript_id", [])
+    if vals and vals[0]:
+        return str(vals[0])
+
+    return str(tx.id)
 
 
 def _extract_isoform_suffix(tx_label: str) -> str:
     """
-    Extract a compact FlyBase-style isoform suffix if present.
+    Extract a compact FlyBase-style isoform suffix.
 
-    Examples
-    --------
-      dsx-RA -> A
-      dsx-RB -> B
-      ovo-RC -> C
-
-    If the expected '-R...' pattern is absent, return the original label.
+    Examples:
+      Polr1B-RA -> A
+      dsx-RB    -> B
+      ovo-RC    -> C
     """
-    if "-R" in tx_label and len(tx_label.split("-R")[-1]) >= 1:
-        return tx_label.split("-R")[-1]
+    if "-R" in tx_label:
+        suffix = tx_label.split("-R")[-1]
+        if suffix:
+            return suffix
     return tx_label
 
 
