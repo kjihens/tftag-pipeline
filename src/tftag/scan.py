@@ -1,16 +1,25 @@
 """
 Scan for NGG PAMs and emit candidate guides around codons.
 
-Outputs are **explicit and strand-aware**:
+Outputs are explicit and strand-aware:
 - protospacer_start / protospacer_end : genomic 1-based inclusive (always on '+' coordinate axis)
 - pam_start / pam_end                 : genomic 1-based inclusive (always on '+' coordinate axis)
-- grna_seq_23                         : 23-mer in *guide orientation* (5'->3' of the gRNA; PAM at end)
+- grna_seq_23                         : 23-mer in guide orientation (5'->3' of the gRNA; PAM at end)
 - spacer                              : first 20 nt of grna_seq_23
 - pam_seq                             : last 3 nt of grna_seq_23 (typically NGG)
 - grna_strand                         : '+' or '-' (strand of the target site on the genome)
 
+Important design choice
+-----------------------
+Each scanned guide inherits the full metadata of the terminus row it came from.
+That means if annotate.py adds new columns such as:
+  - terminus_transcripts
+  - terminus_isoforms
+  - potential_readthrough
+they will automatically propagate into the candidate guide table.
+
 Note on coordinate conventions
------------------------------
+------------------------------
 We use 1-based inclusive coordinates everywhere to match the rest of the pipeline.
 """
 from __future__ import annotations
@@ -76,6 +85,26 @@ def _cut_distance(codon_s: int, codon_e: int, cut_pos: int) -> int:
     return min(abs(cut_pos - codon_s), abs(cut_pos - codon_e))
 
 
+def _row_metadata(row) -> dict:
+    """
+    Convert an attribute-row namedtuple into a metadata dict that should be
+    copied to every guide derived from that row.
+
+    Why this helper exists
+    ----------------------
+    We do NOT want scan.py to know in advance every possible column that annotate.py
+    might add in the future. Instead, we propagate the full terminus metadata and let
+    the guide-specific fields overwrite only what must differ (e.g. grna_strand, PAM coords).
+
+    This is what ensures columns like:
+      - terminus_transcripts
+      - terminus_isoforms
+      - potential_readthrough
+    survive into the scanned candidate guide table.
+    """
+    return row._asdict().copy()
+
+
 def _find_pams(seq_plus: str, window_start: int, row) -> List[dict]:
     """
     Find + and - strand SpCas9 sites within `seq_plus` (which is '+' oriented).
@@ -88,7 +117,13 @@ def _find_pams(seq_plus: str, window_start: int, row) -> List[dict]:
     window_start:
       Genomic 1-based inclusive start coordinate of seq_plus.
     row:
-      Attribute row (namedtuple from itertuples) with gene metadata and codon coords.
+      Attribute row (namedtuple from itertuples) with gene / terminus metadata.
+
+    Output behaviour
+    ----------------
+    Every output row contains:
+    - all original attribute metadata from `row`
+    - plus guide-specific coordinates and sequence fields
     """
     out: List[dict] = []
 
@@ -98,6 +133,9 @@ def _find_pams(seq_plus: str, window_start: int, row) -> List[dict]:
     codon_s = min(codon_start, codon_end)
     codon_e = max(codon_start, codon_end)
 
+    # Base metadata copied into every guide row from this attribute row
+    base = _row_metadata(row)
+
     # ---------- + strand guides ----------
     # Pattern: [20 spacer][NGG]
     for m in PAM_REGEX_PLUS.finditer(seq_plus):
@@ -105,7 +143,7 @@ def _find_pams(seq_plus: str, window_start: int, row) -> List[dict]:
 
         spacer = m.group(1).upper()
         pam_seq = m.group(2).upper()          # actual 3-mer (NGG)
-        grna_seq_23 = spacer + pam_seq        # in guide orientation already
+        grna_seq_23 = spacer + pam_seq        # already in guide orientation
 
         # Convert window offsets to genomic coordinates (1-based inclusive)
         prot_start = window_start + spacer_start_win
@@ -118,17 +156,9 @@ def _find_pams(seq_plus: str, window_start: int, row) -> List[dict]:
         # We store cut_pos as the last base before the cut on '+' coordinates.
         cut_pos = pam_start - 4
 
-        out.append(
+        d = base.copy()
+        d.update(
             dict(
-                gene_id=row.gene_id,
-                gene_symbol=row.gene_symbol,
-                terminus=row.terminus,
-                feature=row.feature,
-                tag=row.tag,
-                chromosome=chrom,
-                gene_strand=row.gene_strand,
-                codon_start=codon_start,
-                codon_end=codon_end,
                 grna_strand="+",
                 spacer=spacer,
                 pam_seq=pam_seq,
@@ -141,6 +171,7 @@ def _find_pams(seq_plus: str, window_start: int, row) -> List[dict]:
                 cut_distance=_cut_distance(codon_s, codon_e, cut_pos),
             )
         )
+        out.append(d)
 
     # ---------- - strand guides ----------
     # Detect CCN + 20 on '+'; reverse-complement the 23-mer to get guide orientation (spacer+NGG).
@@ -173,17 +204,9 @@ def _find_pams(seq_plus: str, window_start: int, row) -> List[dict]:
         # Cut occurs between (pam_end+3) and (pam_end+4); store last base before cut.
         cut_pos = pam_end + 3
 
-        out.append(
+        d = base.copy()
+        d.update(
             dict(
-                gene_id=row.gene_id,
-                gene_symbol=row.gene_symbol,
-                terminus=row.terminus,
-                feature=row.feature,
-                tag=row.tag,
-                chromosome=chrom,
-                gene_strand=row.gene_strand,
-                codon_start=codon_start,
-                codon_end=codon_end,
                 grna_strand="-",
                 spacer=spacer,
                 pam_seq=pam_seq,
@@ -196,6 +219,7 @@ def _find_pams(seq_plus: str, window_start: int, row) -> List[dict]:
                 cut_distance=_cut_distance(codon_s, codon_e, cut_pos),
             )
         )
+        out.append(d)
 
     return out
 
@@ -208,7 +232,15 @@ def scan_for_guides(
     window_down: int = 30,
     show_progress: bool = True,
 ) -> pd.DataFrame:
-    """Scan all attribute rows and return candidate guides as a DataFrame."""
+    """
+    Scan all attribute rows and return candidate guides as a DataFrame.
+
+    Important
+    ---------
+    The returned DataFrame preserves all metadata columns present in the attribute table,
+    because each guide row is constructed by copying the full source attribute row and then
+    adding guide-specific fields.
+    """
     rows: List[dict] = []
 
     iterator = attribute_df.itertuples(index=False)
