@@ -356,23 +356,39 @@ def choose_arm_for_mutation(
     protospacer_overlap_len: int = 13,
     coding_only: bool = True,
     show_progress: bool = True,
+    debug: bool = True,
+    debug_n: int = 20,
 ) -> pd.DataFrame:
     """
     Determine which arm (HAL/HAR) must be silently mutated to prevent re-cutting.
 
-    Rule:
-      An arm requires mutation only if it contains:
-        (1) the full PAM, and
-        (2) at least `protospacer_overlap_len` PAM-proximal protospacer bases.
+    Rule
+    ----
+    An arm requires mutation only if it contains:
+      (1) the full PAM, and
+      (2) at least `protospacer_overlap_len` PAM-proximal protospacer bases.
 
-    Rationale:
-      If the donor arm does not contain the PAM, the HDR donor cannot recreate a
-      functional target site, so no mutation is needed in that arm.
+    Rationale
+    ---------
+    If the donor arm does not contain the PAM, the HDR donor cannot recreate a
+    functional target site, so no mutation is needed in that arm.
 
     If coding_only=True:
       - start_codon designs are only allowed to mutate HAR
       - stop_codon designs are only allowed to mutate HAL
       If only the non-coding arm satisfies the rule, the guide is rejected.
+
+    Debugging
+    ---------
+    If debug=True, print detailed coordinate diagnostics for the first `debug_n`
+    designable rows:
+      - codon interval
+      - arm intervals
+      - PAM / protospacer intervals
+      - whether PAM is contained in each arm
+      - how many PAM-proximal protospacer bases each arm contains
+      - whether PAM/protospacer overlap the codon
+      - chosen arm / rejection status
     """
     df = gRNA_df.copy()
 
@@ -382,6 +398,7 @@ def choose_arm_for_mutation(
     if "warnings" not in df.columns:
         df["warnings"] = "none"
 
+    # Output / diagnostic columns
     for col, default in [
         ("requires_edit_arm", "none"),
         ("rejected", False),
@@ -398,6 +415,7 @@ def choose_arm_for_mutation(
         return df
 
     work = df[df.get("designable", True)].copy()
+
     iterator = work.itertuples(index=True)
     if show_progress:
         iterator = tqdm(iterator, total=len(work), desc="Choosing edit arm", leave=False)
@@ -405,6 +423,10 @@ def choose_arm_for_mutation(
     def interval_contains(a_s: int, a_e: int, b_s: int, b_e: int) -> bool:
         """Return True if interval A fully contains interval B."""
         return a_s <= b_s and b_e <= a_e
+
+    def interval_overlaps(a_s: int, a_e: int, b_s: int, b_e: int) -> bool:
+        """Return True if two intervals overlap at all."""
+        return not (a_e < b_s or b_e < a_s)
 
     def count_pam_proximal_spacer_bases_in_arm(
         arm_s: int,
@@ -443,7 +465,7 @@ def choose_arm_for_mutation(
 
         return count
 
-    for row in iterator:
+    for n, row in enumerate(iterator):
         idx = row.Index
 
         if pd.isna(getattr(row, "HALs", np.nan)) or pd.isna(getattr(row, "HARs", np.nan)):
@@ -452,21 +474,33 @@ def choose_arm_for_mutation(
                 work.at[idx, "warnings"],
                 ["Missing homology arm coordinates; cannot choose edit arm"],
             )
+            if debug and n < debug_n:
+                print(
+                    f"[DEBUG choose_arm_for_mutation] {row.gene_id} | {row.feature}\n"
+                    f"  Missing HAL/HAR coordinates\n"
+                )
             continue
 
         HALs, HALe = int(row.HALs), int(row.HALe)
         HARs, HARe = int(row.HARs), int(row.HARe)
 
         rowd = row._asdict()
-        pam_s, pam_e = int(rowd["pam_start"]), int(rowd["pam_end"])
-        prot_s, prot_e = int(rowd["protospacer_start"]), int(rowd["protospacer_end"])
 
-        if pam_s is None or pam_e is None or prot_s is None or prot_e is None:
+        # Use explicit scan output columns directly
+        try:
+            pam_s, pam_e = int(rowd["pam_start"]), int(rowd["pam_end"])
+            prot_s, prot_e = int(rowd["protospacer_start"]), int(rowd["protospacer_end"])
+        except Exception:
             work.at[idx, "requires_edit_arm"] = "none"
             work.at[idx, "warnings"] = _merge_warn(
                 work.at[idx, "warnings"],
                 ["Missing PAM/protospacer coordinates; cannot choose edit arm"],
             )
+            if debug and n < debug_n:
+                print(
+                    f"[DEBUG choose_arm_for_mutation] {row.gene_id} | {row.feature}\n"
+                    f"  Missing explicit PAM/protospacer columns\n"
+                )
             continue
 
         grna_strand = rowd.get("grna_strand") or rowd.get("gRNA_strand")
@@ -476,7 +510,15 @@ def choose_arm_for_mutation(
                 work.at[idx, "warnings"],
                 ["Missing/invalid grna_strand; cannot choose edit arm"],
             )
+            if debug and n < debug_n:
+                print(
+                    f"[DEBUG choose_arm_for_mutation] {row.gene_id} | {row.feature}\n"
+                    f"  Invalid grna_strand={grna_strand!r}\n"
+                )
             continue
+
+        codon_s = int(row.codon_start)
+        codon_e = int(row.codon_end)
 
         # Does each arm contain the full PAM?
         pam_in_HAL = interval_contains(HALs, HALe, pam_s, pam_e)
@@ -500,35 +542,18 @@ def choose_arm_for_mutation(
         hal_requires = pam_in_HAL and (hal_overlap >= protospacer_overlap_len)
         har_requires = pam_in_HAR and (har_overlap >= protospacer_overlap_len)
 
-        if idx < 20:
-            codon_s = int(row.codon_start)
-            codon_e = int(row.codon_end)
-
-            def overlaps(a_s, a_e, b_s, b_e):
-                return not (a_e < b_s or b_e < a_s)
-            print(
-                f"{row.gene_id} | {row.feature} | gene_strand={row.gene_strand} | grna_strand={grna_strand}\n"
-                f"  codon=({codon_s},{codon_e})\n"
-                f"  HAL=({HALs},{HALe})  HAR=({HARs},{HARe})\n"
-                f"  PAM=({pam_s},{pam_e})  PROT=({prot_s},{prot_e})\n"
-                f"  pam_in_HAL={pam_in_HAL}  pam_in_HAR={pam_in_HAR}\n"
-                f"  hal_overlap={hal_overlap}  har_overlap={har_overlap}\n"
-                f"  pam_overlaps_codon={overlaps(pam_s,pam_e,codon_s,codon_e)}\n"
-                f"  prot_overlaps_codon={overlaps(prot_s,prot_e,codon_s,codon_e)}\n"
-                f"  requires HAL={hal_requires}  HAR={har_requires}\n"
-            )
-
         required_coding_arm = "HAR" if row.feature == "start_codon" else "HAL"
 
+        # Under the current donor geometry, both should not happen.
         if hal_requires and har_requires:
-            work.at[idx, "requires_edit_arm"] = "none"
+            target_arm = "none"
             work.at[idx, "rejected"] = True
             work.at[idx, "reject_reason"] = (
                 f"Internal error: both arms satisfy PAM+{protospacer_overlap_len}bp rule"
             )
             work.at[idx, "warnings"] = _merge_warn(
                 work.at[idx, "warnings"],
-                [f"Internal error: both arms satisfy PAM+{protospacer_overlap_len}bp rule"]
+                [f"Internal error: both arms satisfy PAM+{protospacer_overlap_len}bp rule"],
             )
         elif hal_requires:
             target_arm = "HAL"
@@ -544,6 +569,50 @@ def choose_arm_for_mutation(
             work.at[idx, "reject_reason"] = (
                 f"requires edits in non-coding arm {target_arm} for {row.feature}; rejected"
             )
+
+        # -----------------------------
+        # Debug output
+        # -----------------------------
+        if debug and n < debug_n:
+            print(
+                f"[DEBUG choose_arm_for_mutation] row={n} idx={idx}\n"
+                f"  gene_id={row.gene_id} gene_symbol={getattr(row, 'gene_symbol', 'NA')}\n"
+                f"  feature={row.feature} terminus={getattr(row, 'terminus', 'NA')}\n"
+                f"  chromosome={row.chromosome} gene_strand={row.gene_strand} grna_strand={grna_strand}\n"
+                f"  codon=({codon_s},{codon_e})\n"
+                f"  HAL=({HALs},{HALe}) len={HALe - HALs + 1}\n"
+                f"  HAR=({HARs},{HARe}) len={HARe - HARs + 1}\n"
+                f"  PAM=({pam_s},{pam_e}) len={pam_e - pam_s + 1}\n"
+                f"  PROT=({prot_s},{prot_e}) len={prot_e - prot_s + 1}\n"
+                f"  pam_overlaps_codon={interval_overlaps(pam_s, pam_e, codon_s, codon_e)}\n"
+                f"  prot_overlaps_codon={interval_overlaps(prot_s, prot_e, codon_s, codon_e)}\n"
+                f"  pam_in_HAL={pam_in_HAL} pam_in_HAR={pam_in_HAR}\n"
+                f"  HAL_pam_proximal_overlap={hal_overlap}\n"
+                f"  HAR_pam_proximal_overlap={har_overlap}\n"
+                f"  protospacer_overlap_len_threshold={protospacer_overlap_len}\n"
+                f"  HAL_requires={hal_requires} HAR_requires={har_requires}\n"
+                f"  required_coding_arm={required_coding_arm}\n"
+                f"  chosen_requires_edit_arm={target_arm}\n"
+                f"  rejected={work.at[idx, 'rejected']}\n"
+                f"  reject_reason={work.at[idx, 'reject_reason']}\n"
+            )
+
+    # Optional summary counts when debugging
+    if debug:
+        print("[DEBUG choose_arm_for_mutation] summary:")
+        print(work["requires_edit_arm"].value_counts(dropna=False))
+        if "HAL_pam_in_arm" in work.columns:
+            print(f"  HAL_pam_in_arm true: {int(work['HAL_pam_in_arm'].sum())}")
+        if "HAR_pam_in_arm" in work.columns:
+            print(f"  HAR_pam_in_arm true: {int(work['HAR_pam_in_arm'].sum())}")
+        if "HAL_pam_proximal_overlap" in work.columns:
+            print("  HAL_pam_proximal_overlap summary:")
+            print(work["HAL_pam_proximal_overlap"].describe())
+        if "HAR_pam_proximal_overlap" in work.columns:
+            print("  HAR_pam_proximal_overlap summary:")
+            print(work["HAR_pam_proximal_overlap"].describe())
+        if "rejected" in work.columns:
+            print(work["rejected"].value_counts(dropna=False))
 
     out = df.copy()
     out.update(work)
