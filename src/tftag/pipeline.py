@@ -171,6 +171,18 @@ def run_pipeline(
         print("No candidate guides found.")
         return
     
+    candidates["grna_23_start"] = np.where(
+        candidates["grna_strand"] == "+",
+        candidates["protospacer_start"],
+        candidates["pam_start"],
+    )
+
+    candidates["grna_23_end"] = np.where(
+        candidates["grna_strand"] == "+",
+        candidates["pam_end"],
+        candidates["protospacer_end"],
+    )
+    
     # Check variants in gRNA in stock lines (if requested)
     if check_stock_variants:
         print(candidates.columns.tolist())
@@ -203,7 +215,12 @@ def run_pipeline(
         
     # Prefilter feasibility (design-aware)
     candidates = design.prefilter_designable(candidates, fasta_dict, show_progress=True)
-    if "designable" in candidates.columns and not candidates["designable"].any():
+    before = len(candidates)
+    candidates = candidates[candidates["designable"]].copy()
+    removed = before - len(candidates)
+    if removed:
+        print(f"Removed {removed} non-designable guides.")
+    if candidates.empty:
         print("No designable guides after prefilter.")
         return
     
@@ -270,6 +287,46 @@ def run_pipeline(
     candidates["run_id"] = run_id
     candidates["gtf_db_path"] = gtf_db_path
     candidates["genome_fasta_path"] = genome_fasta_path
+
+    # Final output columns: keep useful selection/design information, drop internal construction fields
+    final_columns = [
+        "gene_id",
+        "gene_symbol",
+        "terminus",
+        "feature",
+        "tag",
+        "chromosome",
+        "gene_strand",
+        "codon_start",
+        "codon_end",
+        "grna_strand",
+        "grna_23_start",
+        "grna_23_end",
+        "grna_seq_23",
+        "cut_pos",
+        "cut_distance",
+        "rs3_score",
+        "n_hits",
+        "n_mm0",
+        "n_mm1",
+        "n_mm2",
+        "n_mm3",
+        "n_mm4",
+        "stock_name",
+        "stock_seq_23",
+        "stock_seq_matches_ref",
+        "stock_nonpam_mutated",
+        "stock_variant_positions",
+        "stock_variant_descriptions",
+        "warnings",
+        "run_id",
+        "gtf_db_path",
+        "genome_fasta_path",
+    ]
+
+    # keep only columns that actually exist
+    final_columns = [c for c in final_columns if c in candidates.columns]
+    candidates = candidates[final_columns].copy()
 
     # Write SQLite
     to_sqlite(
