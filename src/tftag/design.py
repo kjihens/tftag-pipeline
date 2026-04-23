@@ -500,6 +500,24 @@ def choose_arm_for_mutation(
         hal_requires = pam_in_HAL and (hal_overlap >= protospacer_overlap_len)
         har_requires = pam_in_HAR and (har_overlap >= protospacer_overlap_len)
 
+        if idx < 20:
+            codon_s = int(row.codon_start)
+            codon_e = int(row.codon_end)
+
+            def overlaps(a_s, a_e, b_s, b_e):
+                return not (a_e < b_s or b_e < a_s)
+            print(
+                f"{row.gene_id} | {row.feature} | gene_strand={row.gene_strand} | grna_strand={grna_strand}\n"
+                f"  codon=({codon_s},{codon_e})\n"
+                f"  HAL=({HALs},{HALe})  HAR=({HARs},{HARe})\n"
+                f"  PAM=({pam_s},{pam_e})  PROT=({prot_s},{prot_e})\n"
+                f"  pam_in_HAL={pam_in_HAL}  pam_in_HAR={pam_in_HAR}\n"
+                f"  hal_overlap={hal_overlap}  har_overlap={har_overlap}\n"
+                f"  pam_overlaps_codon={overlaps(pam_s,pam_e,codon_s,codon_e)}\n"
+                f"  prot_overlaps_codon={overlaps(prot_s,prot_e,codon_s,codon_e)}\n"
+                f"  requires HAL={hal_requires}  HAR={har_requires}\n"
+            )
+
         required_coding_arm = "HAR" if row.feature == "start_codon" else "HAL"
 
         if hal_requires and har_requires:
