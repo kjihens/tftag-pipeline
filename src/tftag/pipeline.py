@@ -298,11 +298,11 @@ def run_pipeline(
             print("No guides remain after per-tag selection.")
             return
 
-    # Ensure termini with no guide are represented in the final output
-    candidates = annotate.add_no_guide_rows(candidates, attribute)
-
     # Design validation primers
     candidates = design.validation_primers(candidates, fasta_dict, show_progress=True)
+
+    # Ensure termini with no guide are represented in the final output
+    candidates = annotate.add_no_guide_rows(candidates, attribute)
 
     # Add provenance
     candidates["run_id"] = run_id
