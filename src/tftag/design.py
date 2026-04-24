@@ -918,7 +918,7 @@ def design_validation_primers(gRNA_df: pd.DataFrame, fasta_dict, show_progress: 
     df["PCR2_reverse_primer_GC"] = np.nan
     df["PCR2_reverse_primer_len"] = np.nan
 
-    mask_bad = ~df["designable"]
+    mask_bad = ~df["designable"].fillna(False)
     df.loc[mask_bad, "warnings"] = df.loc[mask_bad, "warnings"].apply(lambda w: _merge_warn(w, ["skipped: prefilter_designable"]))
 
     iterator = df.iterrows()
