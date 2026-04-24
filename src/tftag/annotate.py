@@ -46,6 +46,7 @@ from __future__ import annotations
 
 from typing import Iterable
 import pandas as pd
+import numpy as np
 from tqdm.auto import tqdm
 import gffutils
 
