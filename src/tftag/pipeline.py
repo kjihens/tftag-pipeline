@@ -275,14 +275,8 @@ def run_pipeline(
             print("Error: --min-offtarget-mismatch requires off-target enumeration (run_offtargets=True).")
             return
 
-    # If selecting one per tag, do it BEFORE expensive primer3 work.
-    if selection != "all":
-        candidates = select_one_per_tag(candidates, mode=selection)
-        if candidates.empty:
-            print("No guides remain after per-tag selection.")
-            return
 
-    # Design steps
+    # Design Homology Arms
     candidates = design.add_homology_arms(candidates, fasta_dict, show_progress=True)
 
     candidates = design.choose_arm_for_mutation(
@@ -294,6 +288,14 @@ def run_pipeline(
 
     candidates = design.apply_silent_edits(candidates, show_progress=True)
 
+    # If selecting one per tag, do it BEFORE expensive primer3 work.
+    if selection != "all":
+        candidates = select_one_per_tag(candidates, mode=selection)
+        if candidates.empty:
+            print("No guides remain after per-tag selection.")
+            return
+
+    # Design validation primers
     candidates = design.validation_primers(candidates, fasta_dict, show_progress=True)
 
     # Add provenance
