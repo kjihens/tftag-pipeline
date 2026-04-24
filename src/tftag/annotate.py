@@ -613,3 +613,78 @@ def build_attribute_table(genes: Iterable[str], db, *, verbose: bool = True) -> 
     #     print("Termini with transcript assignments:", int((df["terminus_transcripts"] != "").sum()))
 
     return df
+
+def add_no_guide_rows(
+    candidates: pd.DataFrame,
+    attribute: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Ensure every terminus from the attribute table appears in the final output.
+
+    If no guide was found for a terminus, add one placeholder row with:
+      - guide_found = False
+      - no_guide_reason = "no guide RNA found in PAM search window"
+      - selection_tier = 99
+      - selection_warning = "no guide RNA found"
+    """
+    if attribute.empty:
+        return candidates
+
+    target_cols = [
+        "gene_id",
+        "gene_symbol",
+        "terminus",
+        "feature",
+        "tag",
+        "chromosome",
+        "gene_strand",
+        "codon_start",
+        "codon_end",
+        "terminus_transcripts",
+        "terminus_isoforms",
+        "potential_readthrough",
+    ]
+    target_cols = [c for c in target_cols if c in attribute.columns]
+
+    termini = attribute[target_cols].drop_duplicates(["gene_id", "tag"]).copy()
+
+    if candidates.empty:
+        found_keys = pd.DataFrame(columns=["gene_id", "tag"])
+    else:
+        found_keys = candidates[["gene_id", "tag"]].drop_duplicates()
+
+    missing = termini.merge(
+        found_keys,
+        on=["gene_id", "tag"],
+        how="left",
+        indicator=True,
+    )
+    missing = missing[missing["_merge"] == "left_only"].drop(columns=["_merge"])
+
+    if missing.empty:
+        out = candidates.copy()
+        out["guide_found"] = True
+        if "no_guide_reason" not in out.columns:
+            out["no_guide_reason"] = "none"
+        return out
+
+    # Add all columns present in candidates to the missing-placeholder rows.
+    for col in candidates.columns:
+        if col not in missing.columns:
+            missing[col] = np.nan
+
+    missing["guide_found"] = False
+    missing["no_guide_reason"] = "no guide RNA found in PAM search window"
+    missing["selection_tier"] = 99
+    missing["selection_score"] = np.nan
+    missing["selection_warning"] = "no guide RNA found"
+    missing["warnings"] = "no guide RNA found"
+
+    out = candidates.copy()
+    out["guide_found"] = True
+    if "no_guide_reason" not in out.columns:
+        out["no_guide_reason"] = "none"
+
+    # Match column order.
+    missing = missing[out.columns]
+    return pd.concat([out, missing], ignore_index=True)

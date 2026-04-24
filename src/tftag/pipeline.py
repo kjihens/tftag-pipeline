@@ -298,6 +298,9 @@ def run_pipeline(
             print("No guides remain after per-tag selection.")
             return
 
+    # Ensure termini with no guide are represented in the final output
+    candidates = annotate.add_no_guide_rows(candidates, attribute)
+
     # Design validation primers
     candidates = design.validation_primers(candidates, fasta_dict, show_progress=True)
 
@@ -365,6 +368,9 @@ def run_pipeline(
             print(f"    {term}-termini: {count}")
     
     print("\nPost-filter summary:")
-    print(f"  Candidate guides: {len(candidates)}")
-    print(f"  Genes covered: {candidates['gene_id'].nunique()}")
-    print(f"  Termini covered: {candidates[['gene_id','tag']].drop_duplicates().shape[0]}")
+    guide_mask = candidates["guide_found"].fillna(True).astype(bool)
+    print(f"  Output rows: {len(candidates)}")
+    print(f"  Guide rows: {int(guide_mask.sum())}")
+    print(f"  No-guide termini: {int((~guide_mask).sum())}")
+    print(f"  Genes with guides: {candidates.loc[guide_mask, 'gene_id'].nunique()}")
+    print(f"  Termini with guides: {candidates.loc[guide_mask, ['gene_id', 'tag']].drop_duplicates().shape[0]}")
