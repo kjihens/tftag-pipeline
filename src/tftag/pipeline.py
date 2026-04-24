@@ -27,7 +27,7 @@ import pandas as pd
 from . import annotate, scan, efficiency, design, stockcheck
 from .genome_io import create_GTF_db, load_fasta_dict
 from .storage import to_sqlite
-from .select import select_one_per_tag
+from .select import select_one_per_tag, add_guide_selection_score
 from .helpers import parse_genes_arg, filter_by_offtarget_mismatch
 from .off_targeting import enumerate_offtargets_cas_offinder, merge_specificity
 
@@ -288,7 +288,10 @@ def run_pipeline(
 
     candidates = design.apply_silent_edits(candidates, show_progress=True)
 
-    # If selecting one per tag, do it BEFORE expensive primer3 work.
+    # Add selection score
+    candidates = add_guide_selection_score(candidates)
+
+    # Reduce to one guide per terminus if requested
     if selection != "all":
         candidates = select_one_per_tag(candidates, mode=selection)
         if candidates.empty:
