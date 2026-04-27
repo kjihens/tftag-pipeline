@@ -246,10 +246,14 @@ def run_pipeline(
                 show_progress=True,
             )
 
+            removed_pam = 0
+            removed_nonidentical = 0
+            
             # hard reject if PAM GG is mutated
             before = len(candidates)
             candidates = candidates[~candidates["stock_pam_gg_mutated"]].copy()
             removed_pam = before - len(candidates)
+            
             if removed_pam:
                 print(f"Removed {removed_pam} guides with PAM GG mutation in assigned stock.")
 
@@ -257,6 +261,7 @@ def run_pipeline(
                 before = len(candidates)
                 candidates = candidates[candidates["stock_seq_matches_ref"]].copy()
                 removed_nonidentical = before - len(candidates)
+
                 if removed_nonidentical:
                     print(f"Removed {removed_nonidentical} non-identical guides due to --stock_identical_only.")
 
