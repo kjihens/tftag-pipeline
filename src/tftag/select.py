@@ -98,11 +98,10 @@ def add_guide_selection_score(
     df: pd.DataFrame,
     *,
     max_cut_distance: int = 30,
-    w_cut: float = 40.0,
-    w_rs3: float = 25.0,
-    w_offtarget: float = 25.0,
-    w_no_edit: float = 10.0,
-    coding_edit_penalty: float = 5.0,
+    w_cut: float = 0.25,
+    w_rs3: float = 0.20,
+    w_offtarget: float = 0.40,
+    w_edit: float = 0.15,
 ) -> pd.DataFrame:
     """
     Add guide-selection fields.
@@ -174,16 +173,14 @@ def add_guide_selection_score(
     cut_norm = 1.0 - (cut.clip(0, max_cut_distance) / max_cut_distance)
 
     # ------------------------------------------------------------
-    # 3. RS3 efficiency component
+    # 3. RS3 efficiency component (log-odds → probability)
     # ------------------------------------------------------------
     rs3 = pd.to_numeric(out["rs3_score"], errors="coerce")
 
     if rs3.notna().any():
-        if rs3.min(skipna=True) >= 0 and rs3.max(skipna=True) <= 1:
-            rs3_norm = rs3.fillna(rs3.median())
-        else:
-            # Robust fallback if RS3 scores are not naturally 0..1.
-            rs3_norm = rs3.rank(pct=True).fillna(0.5)
+        rs3_clipped = rs3.clip(-3, 3) # avoid overflow in exp; also, extreme RS3 scores are probably not meaningful
+        rs3_norm = 1 / (1 + np.exp(-rs3_clipped)) # log-odds to probability
+        rs3_norm = rs3_norm.fillna(rs3_norm.median()) 
     else:
         rs3_norm = pd.Series(0.5, index=out.index)
 
@@ -225,21 +222,25 @@ def add_guide_selection_score(
     # ------------------------------------------------------------
     requires_edit = out["requires_edit_arm"].fillna("none").astype(str)
 
-    no_edit_score = (requires_edit == "none").astype(float)
+    # Higher is better:
+    #   1.0 = no donor-arm edit needed
+    #   0.7 = acceptable coding-arm edit needed
+    #   0.1 = rejected / non-coding-arm edit, true last resort
+    edit_score = pd.Series(1.0, index=out.index)
 
-    # Mild penalty for coding-arm edits. Non-coding-arm edit cases should already
-    # have rejected=True and therefore tier 2.
-    coding_edit_pen = ((requires_edit != "none") & (~rejected)).astype(float)
+    coding_edit = (requires_edit != "none") & (~rejected)
+    edit_score.loc[coding_edit] = 0.7
+
+    edit_score.loc[rejected] = 0.1
 
     # ------------------------------------------------------------
     # 6. Composite score
     # ------------------------------------------------------------
     out["selection_score"] = (
-        w_cut * cut_norm
+        w_cut * cut_score
         + w_rs3 * rs3_norm
-        + w_offtarget * off_score
-        + w_no_edit * no_edit_score
-        - coding_edit_penalty * coding_edit_pen
+        + w_offtarget * offtarget_score
+        + w_edit * edit_score
     )
 
     # ------------------------------------------------------------
@@ -272,7 +273,7 @@ def add_guide_selection_score(
         warnings.append("; ".join(w) if w else "none")
 
     out["selection_warning"] = warnings
-    
+
     return out
 
 
