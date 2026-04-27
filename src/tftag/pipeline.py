@@ -57,7 +57,7 @@ def run_pipeline(
     min_offtarget_mismatch: int | None = 0,
     offtarget_batch_size: int = 500,
     # Selection / outputs
-    selection: str = "all",  # all|closest|rs3
+    selection: str = "all",  # all|closest|rs3|score
     write_csv: bool = True,
     write_parquet: bool = True,
     stock_vcfs: dict[str, str] | None = None,
@@ -248,7 +248,7 @@ def run_pipeline(
 
             removed_pam = 0
             removed_nonidentical = 0
-            
+
             # hard reject if PAM GG is mutated
             before = len(candidates)
             candidates = candidates[~candidates["stock_pam_gg_mutated"]].copy()
