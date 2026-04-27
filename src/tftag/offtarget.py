@@ -222,25 +222,66 @@ def parse_cas_offinder_output(hit_file: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def summarize_specificity(offtargets: pd.DataFrame, *, max_mismatches: int = 4) -> pd.DataFrame:
+def summarize_specificity(
+    offtargets: pd.DataFrame,
+    candidates: pd.DataFrame | None = None,
+    *,
+    max_mismatches: int = 4,
+) -> pd.DataFrame:
     """
-    Summarise off-target counts per spacer.
+    Summarise Cas-OFFinder hits per spacer.
 
-    Returns columns:
-      spacer, n_hits, n_mm0..n_mm{max_mismatches}
+    Always returns global columns:
+      spacer, n_hits, n_mm0, n_mm1, ..., n_mm{max_mismatches}
+
+    If candidates is provided and contains:
+      spacer, chromosome
+
+    also returns chromosome-aware columns:
+      n_mm0_same_chr, n_mm0_other_chr, ...
+      n_mm1_same_chr, n_mm1_other_chr, ...
+      etc.
+
+    same_chr means:
+      off-target chromosome == target gene chromosome
 
     Notes
     -----
-    - Cas-OFFinder reports mismatches over the full query length (e.g. 23-mer if you queried 23).
-    - n_hits is the sum across 0..max_mismatches bins.
+    Cas-OFFinder usually includes the on-target site as an n_mm0 hit.
+    Therefore n_mm0 == 1 is expected; n_mm0 > 1 means multiple perfect matches.
     """
-    cols = ["spacer", "n_hits"] + [f"n_mm{k}" for k in range(max_mismatches + 1)]
+    base_cols = ["spacer", "n_hits"] + [f"n_mm{k}" for k in range(max_mismatches + 1)]
+
+    chr_cols = []
+    for k in range(max_mismatches + 1):
+        chr_cols.extend([f"n_mm{k}_same_chr", f"n_mm{k}_other_chr"])
 
     if offtargets.empty:
-        return pd.DataFrame(columns=cols)
+        if candidates is not None and {"spacer", "chromosome"}.issubset(candidates.columns):
+            return pd.DataFrame(columns=base_cols + chr_cols)
+        return pd.DataFrame(columns=base_cols)
 
+    hits = offtargets.copy()
+    hits["spacer"] = hits["spacer"].astype(str).str.upper()
+    hits["offtarget_mismatches"] = pd.to_numeric(
+        hits["offtarget_mismatches"],
+        errors="coerce",
+    )
+
+    hits = hits.dropna(subset=["offtarget_mismatches"])
+    hits["offtarget_mismatches"] = hits["offtarget_mismatches"].astype(int)
+
+    # Keep only mismatch bins we explicitly searched/summarise.
+    hits = hits[
+        (hits["offtarget_mismatches"] >= 0)
+        & (hits["offtarget_mismatches"] <= max_mismatches)
+    ].copy()
+
+    # -------------------------
+    # Global n_mm* summary
+    # -------------------------
     agg = (
-        offtargets.groupby(["spacer", "offtarget_mismatches"])
+        hits.groupby(["spacer", "offtarget_mismatches"])
         .size()
         .unstack(fill_value=0)
     )
@@ -249,8 +290,72 @@ def summarize_specificity(offtargets: pd.DataFrame, *, max_mismatches: int = 4) 
         if k not in agg.columns:
             agg[k] = 0
 
-    agg = agg[list(range(max_mismatches + 1))].rename(columns={k: f"n_mm{k}" for k in range(max_mismatches + 1)})
+    agg = agg[[k for k in range(max_mismatches + 1)]]
+    agg = agg.rename(columns={k: f"n_mm{k}" for k in range(max_mismatches + 1)})
     agg["n_hits"] = agg.sum(axis=1)
 
-    out = agg.reset_index()
-    return out[cols]
+    spec = agg.reset_index()
+    spec = spec[base_cols]
+
+    # -------------------------
+    # Optional chromosome-aware summary
+    # -------------------------
+    if candidates is None or not {"spacer", "chromosome"}.issubset(candidates.columns):
+        return spec
+
+    target_chr = (
+        candidates[["spacer", "chromosome"]]
+        .dropna()
+        .drop_duplicates(subset=["spacer"])
+        .copy()
+    )
+    target_chr["spacer"] = target_chr["spacer"].astype(str).str.upper()
+
+    hits_chr = hits.merge(target_chr, on="spacer", how="left")
+
+    # Parser column is currently likely called offtarget_chrom.
+    if "offtarget_chrom" not in hits_chr.columns:
+        raise KeyError("summarize_specificity expected column 'offtarget_chrom' in Cas-OFFinder hits")
+
+    hits_chr["same_chr"] = hits_chr["offtarget_chrom"].astype(str) == hits_chr["chromosome"].astype(str)
+
+    chr_summary = (
+        hits_chr.groupby(["spacer", "offtarget_mismatches", "same_chr"])
+        .size()
+        .reset_index(name="n")
+    )
+
+    same = chr_summary[chr_summary["same_chr"]].pivot(
+        index="spacer",
+        columns="offtarget_mismatches",
+        values="n",
+    ).fillna(0)
+
+    other = chr_summary[~chr_summary["same_chr"]].pivot(
+        index="spacer",
+        columns="offtarget_mismatches",
+        values="n",
+    ).fillna(0)
+
+    for k in range(max_mismatches + 1):
+        if k not in same.columns:
+            same[k] = 0
+        if k not in other.columns:
+            other[k] = 0
+
+    same = same[[k for k in range(max_mismatches + 1)]]
+    other = other[[k for k in range(max_mismatches + 1)]]
+
+    same = same.rename(columns={k: f"n_mm{k}_same_chr" for k in range(max_mismatches + 1)})
+    other = other.rename(columns={k: f"n_mm{k}_other_chr" for k in range(max_mismatches + 1)})
+
+    chr_spec = same.join(other, how="outer").fillna(0).reset_index()
+
+    spec = spec.merge(chr_spec, on="spacer", how="left")
+
+    for col in chr_cols:
+        if col not in spec.columns:
+            spec[col] = 0
+        spec[col] = spec[col].fillna(0).astype(int)
+
+    return spec

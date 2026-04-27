@@ -109,8 +109,12 @@ def enumerate_offtargets_cas_offinder(
         hits = pd.DataFrame()
 
     # IMPORTANT: mismatch bins must match the mismatches value used for the Cas-OFFinder run.
-    spec = offtarget.summarize_specificity(hits, max_mismatches=mismatches)
-
+    spec = offtarget.summarize_specificity(
+    hits,
+    candidates=candidates,
+    max_mismatches=mismatches,
+)
+    
     if not spec.empty and not spec["spacer"].is_unique:
         raise RuntimeError("Specificity summary is not unique per spacer; check parser/aggregator.")
 
@@ -140,14 +144,22 @@ def merge_specificity(
     if spec is not None and not spec.empty:
         df = df.merge(spec, on="spacer", how="left")
 
-    # Ensure all expected columns exist (important for downstream filters/selection).
+    # Ensure all expected global columns exist.
     if "n_hits" not in df.columns:
         df["n_hits"] = 0
-    for k in range(mismatches + 1):
-        col = f"n_mm{k}"
-        if col not in df.columns:
-            df[col] = 0
 
-    cols = ["n_hits"] + [f"n_mm{k}" for k in range(mismatches + 1)]
-    df[cols] = df[cols].fillna(0).astype(int)
+    expected_cols = ["n_hits"]
+
+    for k in range(mismatches + 1):
+        expected_cols.append(f"n_mm{k}")
+        if f"n_mm{k}" not in df.columns:
+            df[f"n_mm{k}"] = 0
+
+        for suffix in ["same_chr", "other_chr"]:
+            col = f"n_mm{k}_{suffix}"
+            expected_cols.append(col)
+            if col not in df.columns:
+                df[col] = 0
+
+    df[expected_cols] = df[expected_cols].fillna(0).astype(int)
     return df

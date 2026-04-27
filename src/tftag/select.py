@@ -190,20 +190,34 @@ def add_guide_selection_score(
     # ------------------------------------------------------------
     # 4. Off-target component
     # ------------------------------------------------------------
-    # More severe mismatch classes are penalised more strongly.
-    # n_mm0 is handled as a tier rule, not as a normal score component.
-    n_mm1 = pd.to_numeric(out["n_mm1"], errors="coerce").fillna(0)
-    n_mm2 = pd.to_numeric(out["n_mm2"], errors="coerce").fillna(0)
-    n_mm3 = pd.to_numeric(out["n_mm3"], errors="coerce").fillna(0)
-    n_mm4 = pd.to_numeric(out["n_mm4"], errors="coerce").fillna(0)
+    def _num_col(name: str, default: float = 0.0) -> pd.Series:
+        if name in out.columns:
+            return pd.to_numeric(out[name], errors="coerce").fillna(default)
+        return pd.Series(default, index=out.index)
 
-    off_penalty_raw = (
-        16.0 * n_mm1
-        + 8.0 * n_mm2
-        + 4.0 * n_mm3
-        + 2.0 * n_mm4
-    )
 
+    # Prefer chromosome-aware off-target counts when available.
+    # Same-chromosome off-targets are weighted more heavily because they are harder
+    # to segregate away with standard balancer strategies.
+    if any(c.endswith("_same_chr") for c in out.columns):
+        off_penalty_raw = (
+            48.0 * _num_col("n_mm1_same_chr")
+            + 24.0 * _num_col("n_mm1_other_chr")
+            + 24.0 * _num_col("n_mm2_same_chr")
+            + 12.0 * _num_col("n_mm2_other_chr")
+            + 12.0 * _num_col("n_mm3_same_chr")
+            + 6.0  * _num_col("n_mm3_other_chr")
+            + 6.0  * _num_col("n_mm4_same_chr")
+            + 3.0  * _num_col("n_mm4_other_chr")
+        )
+    else:
+        # Backward-compatible fallback for older outputs without chromosome-aware counts.
+        off_penalty_raw = (
+            16.0 * _num_col("n_mm1")
+            + 8.0  * _num_col("n_mm2")
+            + 4.0  * _num_col("n_mm3")
+            + 2.0  * _num_col("n_mm4")
+        )
     off_score = 1.0 / (1.0 + off_penalty_raw)
 
     # ------------------------------------------------------------
@@ -241,6 +255,14 @@ def add_guide_selection_score(
         except Exception:
             pass
 
+        try:
+            if float(row.get("n_mm1_same_chr", 0)) > 0:
+                w.append("same-chromosome 1-mismatch off-target detected")
+            if float(row.get("n_mm2_same_chr", 0)) > 0:
+                w.append("same-chromosome 2-mismatch off-target detected")
+        except Exception:
+            pass
+
         if bool(row.get("rejected", False)):
             reason = row.get("reject_reason", "requires non-coding HA edit")
             if reason in (None, "", "none"):
@@ -250,7 +272,7 @@ def add_guide_selection_score(
         warnings.append("; ".join(w) if w else "none")
 
     out["selection_warning"] = warnings
-
+    
     return out
 
 
