@@ -237,9 +237,9 @@ def add_guide_selection_score(
     # 6. Composite score
     # ------------------------------------------------------------
     out["selection_score"] = (
-        w_cut * cut_score
+        w_cut * cut_norm
         + w_rs3 * rs3_norm
-        + w_offtarget * offtarget_score
+        + w_offtarget * off_score
         + w_edit * edit_score
     )
 
