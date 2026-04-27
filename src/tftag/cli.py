@@ -142,7 +142,7 @@ def main():
         )
     )
     # Selection
-    ap.add_argument("--selection", choices=["all", "closest", "rs3"], default="all", help="Return all guides, or select one guide per gene per terminus (start/stop)")
+    ap.add_argument("--selection", choices=["all", "closest", "rs3", "score"], default="all", help="Return all guides, or select one guide per gene per terminus (start/stop)")
     ap.add_argument("--stock_identical_only", action="store_true", help="Keep only guides whose full 23-mer target sequence is identical between reference and assigned stock.")
 
     args = ap.parse_args()
