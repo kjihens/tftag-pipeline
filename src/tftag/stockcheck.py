@@ -175,16 +175,10 @@ def _apply_variants_to_interval(
     for rec in vcf.fetch(chrom, start - 1, end):
         rec_start = rec.pos
         rec_end = rec.pos + len(rec.ref) - 1
-        if rec_start < cursor:
-            variants.append({
-                "pos": rec.pos,
-                "ref": rec.ref.upper(),
-                "alt": ",".join(str(a).upper() for a in (rec.alts or [])),
-                "gt": "overlap_skipped",
-            })
-            continue
+
         if rec_end < start or rec_start > end:
             continue
+
         records.append(rec)
 
     if not records:
@@ -197,7 +191,15 @@ def _apply_variants_to_interval(
         rec_start = rec.pos
         rec_end = rec.pos + len(rec.ref) - 1
 
-        # add untouched region before variant
+        if rec_start < cursor:
+            variants.append({
+                "pos": rec.pos,
+                "ref": rec.ref.upper(),
+                "alt": ",".join(str(a).upper() for a in (rec.alts or [])),
+                "gt": "overlap_skipped",
+            })
+            continue
+
         if cursor < rec_start:
             pieces.append(fasta.fetch(chrom, cursor - 1, rec_start - 1).upper())
 
@@ -212,15 +214,16 @@ def _apply_variants_to_interval(
         elif gt is not None and any(a not in (0, None) for a in gt):
             alt_indices = [a for a in gt if a not in (0, None)]
             alt_idx = alt_indices[0] if alt_indices else None
-            alt = rec.alts[alt_idx - 1] if alt_idx and rec.alts and alt_idx <= len(rec.alts) else None
-            gt_label = "/".join(str(x) for x in gt)
+            alt = (
+                rec.alts[alt_idx - 1]
+                if alt_idx and rec.alts and alt_idx <= len(rec.alts)
+                else None
+            )
+            gt_label = "/".join("." if x is None else str(x) for x in gt)
         else:
             gt_label = str(gt)
 
-        if alt is None:
-            pieces.append(rec.ref.upper())
-        else:
-            pieces.append(str(alt).upper())
+        pieces.append(str(alt).upper() if alt is not None else rec.ref.upper())
 
         variants.append({
             "pos": rec.pos,
@@ -231,12 +234,10 @@ def _apply_variants_to_interval(
 
         cursor = rec_end + 1
 
-    # trailing reference
     if cursor <= end:
         pieces.append(fasta.fetch(chrom, cursor - 1, end).upper())
 
     return "".join(pieces), variants
-
 
 def _orient_to_guide(seq: str, strand: str) -> str:
     """
