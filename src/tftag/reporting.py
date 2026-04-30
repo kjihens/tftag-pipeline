@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import os
 from .runlog import TFTagRunLogger
+from .storage import to_sqlite
 
 
 def add_no_guide_rows(
