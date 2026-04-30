@@ -69,7 +69,7 @@ def main():
             "--stock-group attP40=3L,3R --stock-group attP2=2L,2R,X,4,Y"
         )
     )
-    ap.add_argument("--check_stock-vcf-compatibility", action="store_true", help=(
+    ap.add_argument("--check-stock-vcf-compatibility", action="store_true", help=(
             "Validate that each supplied stock VCF matches the reference FASTA "
             "(contigs, lengths, REF alleles at sampled/all checked variant sites)."
         )
