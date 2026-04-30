@@ -93,6 +93,29 @@ def _group_columns(df: pd.DataFrame) -> list[str]:
         raise KeyError("select_one_per_tag could not find a gene identifier column")
     return [fallback, "tag"]
 
+def _offtarget_tiebreaker_columns(df: pd.DataFrame) -> list[str]:
+    """
+    Return off-target columns in biological priority order.
+
+    Same-chromosome low-mismatch hits are considered most problematic,
+    followed by other-chromosome hits and then global fallback columns.
+    """
+    preferred = []
+
+    for k in range(1, 5):
+        for col in (
+            f"n_mm{k}_same_chr",
+            f"n_mm{k}_other_chr",
+            f"n_mm{k}",
+        ):
+            if col in df.columns:
+                preferred.append(col)
+
+    if "n_hits" in df.columns:
+        preferred.append("n_hits")
+
+    return preferred
+
 
 def add_guide_selection_score(
     df: pd.DataFrame,
@@ -170,7 +193,7 @@ def add_guide_selection_score(
     # 2. Cut-distance component
     # ------------------------------------------------------------
     cut = pd.to_numeric(out["cut_distance"], errors="coerce").fillna(max_cut_distance)
-    cut_norm = 1.0 - (cut.clip(0, max_cut_distance) / max_cut_distance)
+    cut_score = np.exp(-cut / 10) # exponential decay; 1.0 at distance=0, ~0.37 at distance=10, ~0.14 at distance=20, ~0.05 at distance=30
 
     # ------------------------------------------------------------
     # 3. RS3 efficiency component (log-odds → probability)
@@ -237,7 +260,7 @@ def add_guide_selection_score(
     # 6. Composite score
     # ------------------------------------------------------------
     out["selection_score"] = (
-        w_cut * cut_norm
+        w_cut * cut_score
         + w_rs3 * rs3_norm
         + w_offtarget * off_score
         + w_edit * edit_score
@@ -336,7 +359,8 @@ def select_one_per_tag(df: pd.DataFrame, mode: str = "all") -> pd.DataFrame:
     # Composite scoring mode
     # ------------------------------------------------------------
     if mode == "score":
-        df2 = add_guide_selection_score(df2)
+        if "selection_score" not in df2.columns or "selection_tier" not in df2.columns:
+            df2 = add_guide_selection_score(df2)
 
         sort_cols = [
             "selection_tier",
@@ -377,15 +401,9 @@ def select_one_per_tag(df: pd.DataFrame, mode: str = "all") -> pd.DataFrame:
         ascending += [False, True]
 
     # Prefer fewer off-targets as tie-breakers if present.
-    if "n_hits" in df2.columns and df2["n_hits"].notna().any():
-        sort_cols.append("n_hits")
+    for c in _offtarget_tiebreaker_columns(df2):
+        sort_cols.append(c)
         ascending.append(True)
-    else:
-        for c in _mm_cols(df2):
-            if c == "n_mm0":
-                continue
-            sort_cols.append(c)
-            ascending.append(True)
 
     sort_cols, ascending = _add_deterministic_tiebreakers(df2, sort_cols, ascending)
 

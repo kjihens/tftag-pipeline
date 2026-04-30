@@ -25,7 +25,7 @@ We use 1-based inclusive coordinates everywhere to match the rest of the pipelin
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Tuple, Mapping
+from typing import List, Tuple, Mapping
 
 import pandas as pd
 from tqdm.auto import tqdm
@@ -262,3 +262,35 @@ def scan_for_guides(
     if not df.empty:
         df["cut_distance"] = pd.to_numeric(df["cut_distance"], errors="coerce")
     return df
+
+def add_grna_23_coordinates(candidates: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add genomic start/end coordinates for the full 23-mer target sequence.
+
+    For '+' guides:
+      protospacer_start ... pam_end
+
+    For '-' guides:
+      pam_start ... protospacer_end
+    """
+    out = candidates.copy()
+
+    if out.empty:
+        out["grna_23_start"] = pd.Series(dtype="Int64")
+        out["grna_23_end"] = pd.Series(dtype="Int64")
+        return out
+
+    required = ["grna_strand", "protospacer_start", "protospacer_end", "pam_start", "pam_end"]
+    missing = [c for c in required if c not in out.columns]
+    if missing:
+        raise ValueError(f"add_grna_23_coordinates missing required columns: {missing}")
+
+    plus = out["grna_strand"] == "+"
+
+    out["grna_23_start"] = out["pam_start"]
+    out["grna_23_end"] = out["protospacer_end"]
+
+    out.loc[plus, "grna_23_start"] = out.loc[plus, "protospacer_start"]
+    out.loc[plus, "grna_23_end"] = out.loc[plus, "pam_end"]
+
+    return out

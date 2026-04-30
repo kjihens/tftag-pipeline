@@ -88,8 +88,14 @@ def write_cas_offinder_input(
     # Track observed lengths for better diagnostics if we fail length enforcement.
     lengths = seqs.str.len().value_counts(dropna=False).to_dict()
 
-    # Enforce required length.
-    seqs = seqs[seqs.str.len() == pat_len]
+    # check required length.
+    bad = seqs[seqs.str.len() != pat_len]
+    if not bad.empty:
+        raise ValueError(
+            f"Found {len(bad)} query sequences with length != {pat_len}. "
+            f"Observed sequence lengths: {lengths}."
+        )
+    
     if seqs.empty:
         raise ValueError(
             f"No valid query sequences of length {pat_len} were produced. "
@@ -102,7 +108,7 @@ def write_cas_offinder_input(
     queries = [str(q) for q in queries if q]  # ensure pure strings, drop empty
     queries.sort()
 
-    with open(outfile, "w") as f:
+    with open(outfile, "w", encoding="utf-8") as f:
         f.write(genome_fasta_path + "\n")
         f.write(pam_pattern + "\n")
         mm = int(mismatches)
@@ -162,6 +168,10 @@ def parse_cas_offinder_output(hit_file: str) -> pd.DataFrame:
       offtarget_strand,
       offtarget_mismatches
     """
+
+    if not os.path.exists(hit_file):
+        raise FileNotFoundError(f"Cas-OFFinder output file not found: {hit_file}")
+    
     rows: list[dict] = []
 
     def _is_int(tok: str) -> bool:
@@ -171,7 +181,7 @@ def parse_cas_offinder_output(hit_file: str) -> pd.DataFrame:
         except Exception:
             return False
 
-    with open(hit_file, "r") as f:
+    with open(hit_file, "r", encoding="utf-8") as f:
         for raw in f:
             line = raw.strip()
             if not line:
@@ -302,6 +312,21 @@ def summarize_specificity(
     # -------------------------
     if candidates is None or not {"spacer", "chromosome"}.issubset(candidates.columns):
         return spec
+
+    multi_chr_spacers = (
+        candidates[["spacer", "chromosome"]]
+        .dropna()
+        .drop_duplicates()
+        .groupby("spacer")["chromosome"]
+        .nunique()
+    )
+
+    ambiguous = multi_chr_spacers[multi_chr_spacers > 1]
+    if not ambiguous.empty:
+        raise ValueError(
+            "Some spacers occur as candidate guides on multiple chromosomes. "
+            "Chromosome-aware off-target scoring requires spacer+chromosome-level summarisation."
+        )
 
     target_chr = (
         candidates[["spacer", "chromosome"]]

@@ -25,9 +25,9 @@ from typing import Any, Tuple, Optional
 
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
-from .utils import get_sequence
+from .utils import get_sequence, merge_warn
 from .coords import protospacer_coords, pam_coords
 
 
@@ -97,15 +97,6 @@ def _build_rs3_30mer(row: dict[str, Any], fasta_dict) -> Tuple[Optional[str], li
 
     return seq30, warns
 
-
-def _merge_warn(prev: Any, new: list[str]) -> str:
-    """Merge warning strings into a single semicolon-delimited string."""
-    prev_list = [] if prev in (None, "", "none") else [w.strip() for w in str(prev).split(";") if w.strip()]
-    new_list = [w for w in new if w]
-    merged = sorted(set(prev_list + new_list))
-    return "; ".join(merged) if merged else "none"
-
-
 def score_rs3(
     gRNA_df: pd.DataFrame,
     fasta_dict,
@@ -125,6 +116,7 @@ def score_rs3(
     -----
     - If a 'designable' column exists, non-designable rows are skipped for RS3 30-mer build.
     - If the rs3 package is unavailable, rs3_score is left NaN and a warning is added.
+    - rs3_score` is the raw value returned by the rs3 package. In the current selection code it is treated as a log-odds-like value and transformed during guide ranking, not here.
     """
     df = gRNA_df.copy()
     if "warnings" not in df.columns:
@@ -143,8 +135,12 @@ def score_rs3(
     has_designable = "designable" in df.columns
 
     for pos, row in iterator:
-        if has_designable and not bool(df["designable"].iat[pos]):
-            # Keep rs3_30mer None; do not add extra warnings (prefilter already explains).
+        designable_mask = (
+            df["designable"].fillna(False).astype(bool)
+            if "designable" in df.columns
+            else pd.Series(True, index=df.index)
+)
+        if not designable_mask.iat[pos]:
             continue
 
         s, ws = _build_rs3_30mer(row, fasta_dict)
@@ -187,5 +183,5 @@ def score_rs3(
     df["rs3_score"] = scores
 
     # Merge warnings back into the DataFrame.
-    df["warnings"] = [_merge_warn(df["warnings"].iat[i], row_warns[i]) for i in range(n)]
+    df["warnings"] = [merge_warn(df["warnings"].iat[i], row_warns[i]) for i in range(n)]
     return df

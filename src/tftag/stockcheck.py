@@ -175,6 +175,14 @@ def _apply_variants_to_interval(
     for rec in vcf.fetch(chrom, start - 1, end):
         rec_start = rec.pos
         rec_end = rec.pos + len(rec.ref) - 1
+        if rec_start < cursor:
+            variants.append({
+                "pos": rec.pos,
+                "ref": rec.ref.upper(),
+                "alt": ",".join(str(a).upper() for a in (rec.alts or [])),
+                "gt": "overlap_skipped",
+            })
+            continue
         if rec_end < start or rec_start > end:
             continue
         records.append(rec)
@@ -201,8 +209,10 @@ def _apply_variants_to_interval(
 
         if gt == (0, 0):
             gt_label = "0/0"
-        elif gt and 1 in gt:
-            alt = rec.alts[0] if rec.alts else None
+        elif gt is not None and any(a not in (0, None) for a in gt):
+            alt_indices = [a for a in gt if a not in (0, None)]
+            alt_idx = alt_indices[0] if alt_indices else None
+            alt = rec.alts[alt_idx - 1] if alt_idx and rec.alts and alt_idx <= len(rec.alts) else None
             gt_label = "/".join(str(x) for x in gt)
         else:
             gt_label = str(gt)
@@ -310,6 +320,18 @@ def _diff_positions(ref23: str, stock23: str) -> str:
 # Main annotation
 # ---------------------------------------------------------------------
 
+def _empty_stock_record(status: str, stock_name: str | None = None) -> dict:
+    return {
+        "stock_name": stock_name or "",
+        "stock_seq_23": "",
+        "stock_seq_matches_ref": False,
+        "stock_pam_gg_mutated": True,
+        "stock_nonpam_mutated": False,
+        "stock_variant_positions": "none",
+        "stock_variant_descriptions": "none",
+        "stock_check_status": status,
+    }
+
 def annotate_stock_variants(
     guides_df: pd.DataFrame,
     stock_vcfs: Dict[str, str],
@@ -334,49 +356,56 @@ def annotate_stock_variants(
         for name, path in stock_vcfs.items()
     }
 
-    records = []
+    try:
 
-    iterator = df.iterrows()
-    if show_progress:
-        iterator = tqdm(iterator, total=len(df), desc="Stock annotation", leave=False)
+        records = []
 
-    for _, row in iterator:
-        chrom = row["chromosome"]
-        strand = row["grna_strand"]
-        ref23 = str(row["grna_seq_23"]).upper()
+        iterator = df.iterrows()
+        if show_progress:
+            iterator = tqdm(iterator, total=len(df), desc="Stock annotation", leave=False)
 
-        stock_name = chrom_to_stock.get(chrom)
+        for _, row in iterator:
+            chrom = row["chromosome"]
+            strand = row["grna_strand"]
+            ref23 = str(row["grna_seq_23"]).upper()
 
-        if stock_name is None:
-            records.append({"stock_check_status": "no_stock_for_chromosome"})
-            continue
+            stock_name = chrom_to_stock.get(chrom)
 
-        vcf = vcf_by_stock.get(stock_name)
-        if vcf is None:
-            records.append({"stock_check_status": "stock_vcf_not_loaded"})
-            continue
+            if stock_name is None:
+                records.append(_empty_stock_record("no_stock_for_chromosome"))
+                continue
 
-        start, end = _guide_interval_23mer(row)
+            vcf = vcf_by_stock.get(stock_name)
+            if vcf is None:
+                records.append({"stock_check_status": "stock_vcf_not_loaded"})
+                continue
 
-        stock_ref, vars_meta = _apply_variants_to_interval(
-            vcf, fasta, chrom, start, end
-        )
+            start, end = _guide_interval_23mer(row)
 
-        stock23 = _orient_to_guide(stock_ref, strand)
+            stock_ref, vars_meta = _apply_variants_to_interval(
+                vcf, fasta, chrom, start, end
+            )
 
-        records.append({
-            "stock_name": stock_name,
-            "stock_seq_23": stock23,
-            "stock_seq_matches_ref": stock23 == ref23,
-            "stock_pam_gg_mutated": _pam_gg_mutated(ref23, stock23),
-            "stock_nonpam_mutated": _nonpam_mutated(ref23, stock23),
-            "stock_variant_positions": _diff_positions(ref23, stock23),
-            "stock_variant_descriptions": ";".join(
-                f"{v['pos']}:{v['ref']}>{v['alt']}({v['gt']})"
-                for v in vars_meta
-            ),
-            "stock_check_status": "ok" if len(stock23) == len(ref23) else "length_changed",
-        })
+            stock23 = _orient_to_guide(stock_ref, strand)
 
-    ann = pd.DataFrame(records)
-    return pd.concat([df.reset_index(drop=True), ann.reset_index(drop=True)], axis=1)
+            records.append({
+                "stock_name": stock_name,
+                "stock_seq_23": stock23,
+                "stock_seq_matches_ref": stock23 == ref23,
+                "stock_pam_gg_mutated": _pam_gg_mutated(ref23, stock23),
+                "stock_nonpam_mutated": _nonpam_mutated(ref23, stock23),
+                "stock_variant_positions": _diff_positions(ref23, stock23),
+                "stock_variant_descriptions": ";".join(
+                    f"{v['pos']}:{v['ref']}>{v['alt']}({v['gt']})"
+                    for v in vars_meta
+                ),
+                "stock_check_status": "ok" if len(stock23) == len(ref23) else "length_changed",
+            })
+
+        ann = pd.DataFrame(records)
+        return pd.concat([df.reset_index(drop=True), ann.reset_index(drop=True)], axis=1)
+    
+    finally:
+        fasta.close()
+        for vcf in vcf_by_stock.values():
+            vcf.close() 

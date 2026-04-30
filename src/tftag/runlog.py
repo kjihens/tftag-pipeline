@@ -22,7 +22,6 @@ import traceback
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
-
 import pandas as pd
 
 
@@ -55,9 +54,11 @@ def _json_safe(value: Any) -> Any:
             return value.item()
         except Exception:
             pass
-    if pd.isna(value) if not isinstance(value, (list, tuple, dict, set)) else False:
-        return None
-    return value
+    try:
+        if not isinstance(value, (list, tuple, dict, set)) and pd.isna(value):
+            return None
+    except Exception:
+        pass
 
 
 @dataclass
@@ -209,9 +210,10 @@ class TFTagRunLogger:
 
     def success(self) -> None:
         """Record successful completion."""
+        if self.status != "success":
+            self.log("\n=== SUCCESS ===")
         self.status = "success"
         self.data["status"] = "success"
-        self.log("\n=== SUCCESS ===")
 
     def write(self) -> tuple[str, str]:
         """Write text and JSON logs to disk."""
@@ -243,4 +245,5 @@ class TFTagRunLogger:
             "early_termination": True
         })
         self.success()
-    
+
+

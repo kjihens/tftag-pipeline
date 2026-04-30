@@ -1,133 +1,147 @@
 """
-Coordinate helpers (1-based inclusive) for protospacer/PAM/gRNA spans.
+Coordinate helpers for guide, protospacer, and PAM intervals.
 
-All functions accept a dict-like row (pd.Series, dict) and use .get().
+Coordinate convention
+---------------------
+All genomic coordinates are 1-based inclusive.
 
 Design goal
 -----------
-Prefer explicit coordinates when present:
-  - pam_start / pam_end
-  - protospacer_start / protospacer_end
+Prefer explicit coordinates when available:
 
-Fall back to inference only when necessary, using:
-  - gRNA_start/gRNA_end (or grna_start/grna_end)
-  - gRNA_strand/grna_strand
+- pam_start / pam_end
+- protospacer_start / protospacer_end
 
-Notes
------
-- SPACER_LEN = 20, PAM_LEN = 3
-- gRNA spans may represent either:
-    - 20 nt protospacer only, or
-    - 23 nt protospacer+PAM
+Fallback inference is only used for older/intermediate schemas containing:
+
+- grna_start / grna_end or gRNA_start / gRNA_end
+- grna_strand or gRNA_strand
+
+Current TFTag scan output should normally contain explicit coordinates, so this
+module mainly provides compatibility and centralised coordinate interpretation.
 """
+
 from __future__ import annotations
 
-from typing import Optional, Tuple, Any
+from typing import Any
+
+import pandas as pd
+
 
 SPACER_LEN = 20
 PAM_LEN = 3
+GRNA_LEN = SPACER_LEN + PAM_LEN
 
 
-def _isna(x: Any) -> bool:
-    """pandas-aware NA check with a safe fallback."""
+def _isna(value: Any) -> bool:
+    """Return True for None/NA/NaN-like values."""
     try:
-        import pandas as pd
-        return pd.isna(x)
+        return bool(pd.isna(value))
     except Exception:
-        return x is None
+        return value is None
 
 
 def _first_present(row, *keys: str) -> Any:
     """
-    Return the first value in row[key] that is present (not missing/NA).
-    This is safer than `row.get(a) or row.get(b)` because 0/"" are valid values.
+    Return the first non-missing value among candidate row keys.
+
+    This avoids using `or`, which would incorrectly skip valid falsy values.
     """
-    for k in keys:
-        if k in row:
-            v = row.get(k)
-            if not _isna(v):
-                return v
+    for key in keys:
+        if key in row:
+            value = row.get(key)
+            if not _isna(value):
+                return value
+
     return None
 
 
-def _get_strand(row) -> Optional[str]:
-    """Return '+' or '-', else None."""
-    s = _first_present(row, "grna_strand", "gRNA_strand")
-    if s is None:
+def _get_strand(row) -> str | None:
+    """Return guide strand '+' or '-', else None."""
+    strand = _first_present(row, "grna_strand", "gRNA_strand")
+
+    if strand is None:
         return None
-    s = str(s).strip()
-    return s if s in ("+", "-") else None
+
+    strand = str(strand).strip()
+    return strand if strand in ("+", "-") else None
 
 
-def pam_coords(row) -> Tuple[Optional[int], Optional[int]]:
+def pam_coords(row) -> tuple[int | None, int | None]:
     """
-    Return PAM genomic coordinates (1-based inclusive).
+    Return PAM genomic coordinates.
 
     Preference order:
-      1) explicit pam_start/pam_end
-      2) infer from gRNA span + strand, if span is 20 or 23
+    1. explicit pam_start / pam_end
+    2. infer from gRNA span + strand if span length is 20 or 23
     """
-    ps = _first_present(row, "pam_start")
-    pe = _first_present(row, "pam_end")
-    if ps is not None and pe is not None:
-        return int(ps), int(pe)
+    pam_start = _first_present(row, "pam_start")
+    pam_end = _first_present(row, "pam_end")
 
-    gs = _first_present(row, "grna_start", "gRNA_start")
-    ge = _first_present(row, "grna_end", "gRNA_end")
+    if pam_start is not None and pam_end is not None:
+        return int(pam_start), int(pam_end)
+
+    grna_start = _first_present(row, "grna_start", "gRNA_start")
+    grna_end = _first_present(row, "grna_end", "gRNA_end")
     strand = _get_strand(row)
-    if gs is None or ge is None or strand is None:
+
+    if grna_start is None or grna_end is None or strand is None:
         return None, None
 
-    gs = int(gs)
-    ge = int(ge)
-    length = abs(ge - gs) + 1
+    grna_start = int(grna_start)
+    grna_end = int(grna_end)
+    length = abs(grna_end - grna_start) + 1
 
     if strand == "+":
-        if length == SPACER_LEN + PAM_LEN:        # 23
-            return ge - (PAM_LEN - 1), ge
-        if length == SPACER_LEN:                  # 20
-            return ge + 1, ge + PAM_LEN
-    else:  # strand == "-"
-        if length == SPACER_LEN + PAM_LEN:        # 23
-            return gs, gs + (PAM_LEN - 1)
-        if length == SPACER_LEN:                  # 20
-            return gs - PAM_LEN, gs - 1
+        if length == GRNA_LEN:
+            return grna_end - (PAM_LEN - 1), grna_end
+        if length == SPACER_LEN:
+            return grna_end + 1, grna_end + PAM_LEN
+
+    if strand == "-":
+        if length == GRNA_LEN:
+            return grna_start, grna_start + (PAM_LEN - 1)
+        if length == SPACER_LEN:
+            return grna_start - PAM_LEN, grna_start - 1
 
     return None, None
 
 
-def protospacer_coords(row) -> Tuple[Optional[int], Optional[int]]:
+def protospacer_coords(row) -> tuple[int | None, int | None]:
     """
-    Return protospacer genomic coordinates (1-based inclusive).
+    Return protospacer genomic coordinates.
 
     Preference order:
-      1) explicit protospacer_start/protospacer_end
-      2) infer from gRNA span + strand, if span is 20 or 23
+    1. explicit protospacer_start / protospacer_end
+    2. infer from gRNA span + strand if span length is 20 or 23
     """
-    ps = _first_present(row, "protospacer_start")
-    pe = _first_present(row, "protospacer_end")
-    if ps is not None and pe is not None:
-        return int(ps), int(pe)
+    prot_start = _first_present(row, "protospacer_start")
+    prot_end = _first_present(row, "protospacer_end")
 
-    gs = _first_present(row, "grna_start", "gRNA_start")
-    ge = _first_present(row, "grna_end", "gRNA_end")
+    if prot_start is not None and prot_end is not None:
+        return int(prot_start), int(prot_end)
+
+    grna_start = _first_present(row, "grna_start", "gRNA_start")
+    grna_end = _first_present(row, "grna_end", "gRNA_end")
     strand = _get_strand(row)
-    if gs is None or ge is None or strand is None:
+
+    if grna_start is None or grna_end is None or strand is None:
         return None, None
 
-    gs = int(gs)
-    ge = int(ge)
-    length = abs(ge - gs) + 1
+    grna_start = int(grna_start)
+    grna_end = int(grna_end)
+    length = abs(grna_end - grna_start) + 1
 
     if strand == "+":
-        if length == SPACER_LEN + PAM_LEN:        # 23
-            return gs, ge - PAM_LEN
-        if length == SPACER_LEN:                  # 20
-            return gs, ge
-    else:  # strand == "-"
-        if length == SPACER_LEN + PAM_LEN:        # 23
-            return gs + PAM_LEN, ge
-        if length == SPACER_LEN:                  # 20
-            return gs, ge
+        if length == GRNA_LEN:
+            return grna_start, grna_end - PAM_LEN
+        if length == SPACER_LEN:
+            return grna_start, grna_end
+
+    if strand == "-":
+        if length == GRNA_LEN:
+            return grna_start + PAM_LEN, grna_end
+        if length == SPACER_LEN:
+            return grna_start, grna_end
 
     return None, None

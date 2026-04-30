@@ -2,113 +2,85 @@
 End-to-end orchestrator for TFTag.
 
 High-level flow
---------------
-1) Build/start from codon features (start/stop codons) via annotate.build_attribute_table
-2) Scan PAMs around each codon via scan.scan_for_guides
-3) Prefilter loci that cannot support full arms/primer windows via design.prefilter_designable
-4) Compute RS3 on-target scores via efficiency.score_rs3
-5) Enumerate off-targets (Cas-OFFinder) and merge summary; optional filtering
-6) Optionally select one guide per (gene_id, tag) before expensive design steps
-7) Design steps: homology arms, choose edit arm, apply silent edits, validation primers
-8) Write SQLite (+ optional CSV/Parquet snapshots)
+---------------
+1) Build codon/terminus table from genome annotation
+2) Scan PAMs around each terminus
+3) Optionally check stock VCF compatibility and guide/stock compatibility
+4) Prefilter designable guides
+5) Score RS3 efficiency
+6) Enumerate and summarise off-targets
+7) Build homology arms and determine edit requirements
+8) Score/rank guides
+9) Optionally select one guide per terminus
+10) Design validation primers
+11) Add no-guide placeholder rows
+12) Write SQLite/CSV/Parquet and run logs
 
 Conventions
 -----------
-- Genomic coordinates: 1-based inclusive
-- `mismatches` defines Cas-OFFinder maximum mismatches searched (and thus the n_mm* columns produced)
+- Genomic coordinates are 1-based inclusive.
+- `mismatches` defines the maximum Cas-OFFinder mismatch class searched.
 """
+
 from __future__ import annotations
 
 import os
 import uuid
-import numpy as np
-import pandas as pd
 
-from . import annotate, scan, efficiency, design, stockcheck
-from .genome_io import create_GTF_db, load_fasta_dict
-from .storage import to_sqlite
-from .select import select_one_per_tag, add_guide_selection_score
-from .helpers import parse_genes_arg, filter_by_offtarget_mismatch
+import numpy as np
+
+from . import annotate, efficiency, scan, stockcheck
+from .genome_io import create_gtf_db, load_fasta_dict
+from .helpers import filter_by_offtarget_mismatch, parse_genes_arg
 from .off_targeting import enumerate_offtargets_cas_offinder, merge_specificity
 from .runlog import TFTagRunLogger
+from .select import add_guide_selection_score, select_one_per_tag
+from .reporting import (
+    add_no_guide_rows,
+    add_provenance,
+    candidate_coverage_summary,
+    drop_internal_columns,
+    final_output_summary,
+    print_summary_block,
+    terminus_summary,
+    write_no_guide_only_output,
+    write_outputs,
+)
+from .editing import choose_arm_for_mutation, apply_silent_edits
+from .primers import design_validation_primers
 
-
-def run_pipeline(
+def make_run_parameters(
+    *,
     gtf_file: str,
     gtf_db_path: str,
     genome_fasta_path: str,
-    genes: str | None = None,
-    basename: str = "tftag",
-    outdir: str = "out",
-    output_table: str = "guides",
-    pam_window_up: int = 30,
-    pam_window_down: int = 30,
-    tracrRNA: str = "Hsu2013",
-    batch_size_rs3: int = 2048,
-    protospacer_overlap_len: int = 13,
-    # Off-targets (Cas-OFFinder only)
-    run_offtargets: bool = True,
-    cas_offinder_bin: str = "cas-offinder",
-    device_spec: str = "C",
-    mismatches: int = 4,
-    # For SpCas9 NGG: 20N + GG (pattern length must match query length)
-    pam_pattern: str = "NNNNNNNNNNNNNNNNNNNNNGG",
-    # Filtering: None/0 = no filter; 2 => require n_mm0==1 and n_mm1==0; -1 => strict uniqueness (within searched mm space)
-    min_offtarget_mismatch: int | None = 0,
-    offtarget_batch_size: int = 500,
-    # Selection / outputs
-    selection: str = "all",  # all|closest|rs3|score
-    write_csv: bool = True,
-    write_parquet: bool = True,
-    stock_vcfs: dict[str, str] | None = None,
-    chrom_to_stock: dict[str, str] | None = None,
-    check_stock_vcf_compatibility: bool = False,
-    check_stock_variants: bool = False,
-    stock_identical_only: bool = False,
-) -> None:
-    """
-    Run the TFTag pipeline.
-
-    per_tag:
-      - "all": keep all candidate guides for each (gene_id, tag)
-      - "closest": keep one guide per (gene_id, tag) with smallest cut_distance
-      - "rs3": keep one guide per (gene_id, tag) with highest rs3_score
-
-    min_offtarget_mismatch:
-      - None or 0: no off-target filtering
-      - 2: keep only guides with n_mm0 == 1 and n_mm1 == 0
-      - 3: additionally require n_mm2 == 0
-      - -1: strict uniqueness (mm0==1 and all other n_mm* == 0)
-        Note: “strict” is only as strict as the `mismatches` you searched (e.g. mismatches=4).
-    """
-    if selection not in ("all", "closest", "rs3", "score"):
-        raise ValueError("selection must be one of: all, closest, rs3, score")
-    if mismatches < 0:
-        raise ValueError("mismatches must be >= 0")
-
-    if min_offtarget_mismatch is not None:
-        min_offtarget_mismatch = int(min_offtarget_mismatch)
-        if min_offtarget_mismatch < -1:
-            raise ValueError("min_offtarget_mismatch must be -1, 0, a positive integer, or None")
-        # If the user requests a threshold beyond what Cas-OFFinder computed, fail fast.
-        # Example: min_offtarget_mismatch=6 requires at least n_mm1..n_mm5 columns.
-        if min_offtarget_mismatch > 0 and (min_offtarget_mismatch - 1) > mismatches:
-            raise ValueError(
-                f"min_offtarget_mismatch={min_offtarget_mismatch} requires mismatches >= {min_offtarget_mismatch - 1}, "
-                f"but mismatches={mismatches}."
-            )
-
-    # Ensure output directories exist
-    os.makedirs(outdir, exist_ok=True)
-
-    run_id = uuid.uuid4().hex[:12]
-
-    stock_vcfs = stock_vcfs or {}
-    chrom_to_stock = chrom_to_stock or {}
-
-    logger = TFTagRunLogger(outdir=outdir, basename=basename, run_id=run_id)
-
-    params = {
+    genes: str | None,
+    basename: str,
+    outdir: str,
+    output_table: str,
+    pam_window_up: int,
+    pam_window_down: int,
+    tracrRNA: str,
+    batch_size_rs3: int,
+    protospacer_overlap_len: int,
+    run_offtargets: bool,
+    cas_offinder_bin: str,
+    device_spec: str,
+    mismatches: int,
+    pam_pattern: str,
+    min_offtarget_mismatch: int | None,
+    offtarget_batch_size: int,
+    selection: str,
+    write_csv: bool,
+    write_parquet: bool,
+    check_stock_vcf_compatibility: bool,
+    check_stock_variants: bool,
+    stock_identical_only: bool,
+    stock_vcfs: dict[str, str],
+    chrom_to_stock: dict[str, str],
+) -> dict:
+    """Collect run parameters for reproducible logging."""
+    return {
         "gtf_file": gtf_file,
         "gtf_db_path": gtf_db_path,
         "genome_fasta_path": genome_fasta_path,
@@ -138,25 +110,141 @@ def run_pipeline(
         "chrom_to_stock": chrom_to_stock,
     }
 
-    logger.start(parameters=params)
+
+def run_pipeline(
+    gtf_file: str,
+    gtf_db_path: str,
+    genome_fasta_path: str,
+    genes: str | None = None,
+    basename: str = "tftag",
+    outdir: str = "out",
+    output_table: str = "guides",
+    pam_window_up: int = 30,
+    pam_window_down: int = 30,
+    tracrRNA: str = "Hsu2013",
+    batch_size_rs3: int = 2048,
+    protospacer_overlap_len: int = 13,
+    run_offtargets: bool = True,
+    cas_offinder_bin: str = "cas-offinder",
+    device_spec: str = "C",
+    mismatches: int = 4,
+    pam_pattern: str = "NNNNNNNNNNNNNNNNNNNNNGG",
+    min_offtarget_mismatch: int | None = 0,
+    offtarget_batch_size: int = 500,
+    selection: str = "all",
+    write_csv: bool = True,
+    write_parquet: bool = True,
+    stock_vcfs: dict[str, str] | None = None,
+    chrom_to_stock: dict[str, str] | None = None,
+    check_stock_vcf_compatibility: bool = False,
+    check_stock_variants: bool = False,
+    stock_identical_only: bool = False,
+) -> None:
+    """
+    Run the TFTag design pipeline.
+
+    Parameters
+    ----------
+    selection:
+        "all" keeps all candidate guides.
+        "closest", "rs3", and "score" reduce to one guide per (gene_id, tag).
+
+    min_offtarget_mismatch:
+        None or 0 disables off-target filtering.
+        Positive values require off-target enumeration and filter guides according
+        to the helper logic in `helpers.filter_by_offtarget_mismatch`.
+        -1 requests strict uniqueness within the searched mismatch space.
+    """
+    if selection not in ("all", "closest", "rs3", "score"):
+        raise ValueError("selection must be one of: all, closest, rs3, score")
+
+    if mismatches < 0:
+        raise ValueError("mismatches must be >= 0")
+
+    if min_offtarget_mismatch is not None:
+        min_offtarget_mismatch = int(min_offtarget_mismatch)
+
+        if min_offtarget_mismatch < -1:
+            raise ValueError(
+                "min_offtarget_mismatch must be -1, 0, a positive integer, or None"
+            )
+
+        if min_offtarget_mismatch > 0 and (min_offtarget_mismatch - 1) > mismatches:
+            raise ValueError(
+                f"min_offtarget_mismatch={min_offtarget_mismatch} requires "
+                f"mismatches >= {min_offtarget_mismatch - 1}, but mismatches={mismatches}."
+            )
+
+    if not run_offtargets and min_offtarget_mismatch not in (None, 0):
+        raise ValueError(
+            "--min-offtarget-mismatch requires off-target enumeration. "
+            "Remove --no-offtargets or set --min-offtarget-mismatch 0."
+        )
+
+    os.makedirs(outdir, exist_ok=True)
+
+    run_id = uuid.uuid4().hex[:12]
+    stock_vcfs = stock_vcfs or {}
+    chrom_to_stock = chrom_to_stock or {}
+
+    logger = TFTagRunLogger(outdir=outdir, basename=basename, run_id=run_id)
+
+    logger.start(
+        parameters=make_run_parameters(
+            gtf_file=gtf_file,
+            gtf_db_path=gtf_db_path,
+            genome_fasta_path=genome_fasta_path,
+            genes=genes,
+            basename=basename,
+            outdir=outdir,
+            output_table=output_table,
+            pam_window_up=pam_window_up,
+            pam_window_down=pam_window_down,
+            tracrRNA=tracrRNA,
+            batch_size_rs3=batch_size_rs3,
+            protospacer_overlap_len=protospacer_overlap_len,
+            run_offtargets=run_offtargets,
+            cas_offinder_bin=cas_offinder_bin,
+            device_spec=device_spec,
+            mismatches=mismatches,
+            pam_pattern=pam_pattern,
+            min_offtarget_mismatch=min_offtarget_mismatch,
+            offtarget_batch_size=offtarget_batch_size,
+            selection=selection,
+            write_csv=write_csv,
+            write_parquet=write_parquet,
+            check_stock_vcf_compatibility=check_stock_vcf_compatibility,
+            check_stock_variants=check_stock_variants,
+            stock_identical_only=stock_identical_only,
+            stock_vcfs=stock_vcfs,
+            chrom_to_stock=chrom_to_stock,
+        )
+    )
 
     try:
-        # Do vcf check
+        # ------------------------------------------------------------
+        # Validate stock VCF arguments and optionally check compatibility
+        # ------------------------------------------------------------
         if check_stock_vcf_compatibility and not stock_vcfs:
             raise ValueError("No stock VCFs supplied. Use --stock_vcf NAME=PATH.")
 
         if check_stock_variants and not stock_vcfs:
-            raise ValueError("Stock variant checking requested, but no stock VCFs were supplied.")
+            raise ValueError(
+                "Stock variant checking requested, but no stock VCFs were supplied."
+            )
 
         if check_stock_variants and not chrom_to_stock:
-            raise ValueError("Stock variant checking requested, but no chromosome-to-stock mapping was supplied.")
-        
+            raise ValueError(
+                "Stock variant checking requested, but no chromosome-to-stock mapping was supplied."
+            )
+
         if check_stock_variants:
             for stock_name, vcf_path in stock_vcfs.items():
                 stockcheck.ensure_fetchable_vcf(vcf_path)
-        
+
         if check_stock_vcf_compatibility:
-            print("Checking stock VCF compatibility with reference FASTA...")
+            logger.log("Checking stock VCF compatibility with reference FASTA...")
+
             for stock_name, vcf_path in stock_vcfs.items():
                 summary = stockcheck.check_vcf_reference_compatibility(
                     vcf_path=vcf_path,
@@ -164,80 +252,100 @@ def run_pipeline(
                     max_records=10000,
                 )
 
-                print(f"\nStock: {stock_name}")
-                print(f"  VCF: {summary['vcf_path']}")
-                print(f"  Records checked: {summary['n_records_checked']}")
-                print(f"  REF mismatches: {summary['n_ref_mismatches']}")
+                logger.log(f"\nStock: {stock_name}")
+                logger.log(f"  VCF: {summary['vcf_path']}")
+                logger.log(f"  Records checked: {summary['n_records_checked']}")
+                logger.log(f"  REF mismatches: {summary['n_ref_mismatches']}")
 
                 if summary["contigs_only_in_vcf"]:
                     extra = summary["contigs_only_in_vcf"]
-                    print(f"  Contigs only in VCF: {len(extra)} (first 10: {extra[:10]})")
+                    logger.log(
+                        f"  Contigs only in VCF: {len(extra)} "
+                        f"(first 10: {extra[:10]})"
+                    )
+
                 if summary["contigs_only_in_fasta"]:
                     extra = summary["contigs_only_in_fasta"]
-                    print(f"  Contigs only in FASTA: {len(extra)} (first 10: {extra[:10]})")
+                    logger.log(
+                        f"  Contigs only in FASTA: {len(extra)} "
+                        f"(first 10: {extra[:10]})"
+                    )
+
                 if summary["length_mismatches"]:
-                    print(f"  Length mismatches: {summary['length_mismatches']}")
+                    logger.log(f"  Length mismatches: {summary['length_mismatches']}")
+
                 if summary["mismatch_examples"]:
-                    print("  REF mismatch examples:")
+                    logger.log("  REF mismatch examples:")
                     for ex in summary["mismatch_examples"]:
-                        print(f"    {ex}")
+                        logger.log(f"    {ex}")
 
         if check_stock_vcf_compatibility and not check_stock_variants:
-            logger.add_summary("Stock VCF compatibility", {
-                "status": "completed",
-                "n_stock_vcfs": len(stock_vcfs),
-            })
-            print("Stock VCF compatibility check completed.")
+            logger.add_summary(
+                "Stock VCF compatibility",
+                {
+                    "status": "completed",
+                    "n_stock_vcfs": len(stock_vcfs),
+                },
+            )
+            logger.log("Stock VCF compatibility check completed.")
             logger.success()
             return
-                
-        # Create/load GTF db
-        db = create_GTF_db(gtf_file, gtf_db_path)
 
-        # Load genome FASTA
+        # ------------------------------------------------------------
+        # Load annotation/database and genome FASTA
+        # ------------------------------------------------------------
+        db = create_gtf_db(gtf_file, gtf_db_path)
         fasta_dict = load_fasta_dict(genome_fasta_path)
 
-        # Resolve genes list
         genes_list = parse_genes_arg(genes)
         if genes_list is None:
             genes_list = [g.id for g in db.features_of_type("gene")]
 
-        # Build codon attribute table
         attribute = annotate.build_attribute_table(genes_list, db)
+        input_summary = terminus_summary(attribute)
 
-        # --- Summary: genes and termini ---
-        n_genes = attribute["gene_id"].nunique()
-        n_termini = len(attribute)
+        logger.add_summary("Input summary", input_summary)
 
-        if "terminus" in attribute.columns:
-            termini_counts = attribute["terminus"].value_counts().to_dict()
-        else:
-            termini_counts = {}
-
-        # Scan for candidate guides
-        candidates = scan.scan_for_guides(
-            attribute, fasta_dict, window_up=pam_window_up, window_down=pam_window_down
-        )
-        if candidates.empty:
-            print("No candidate guides found.")
-            logger.finish_early("No candidate guides found.")
+        if attribute.empty:
+            logger.finish_early("No start_codon or stop_codon features found for requested genes.")
             return
-        
-        candidates["grna_23_start"] = np.where(
-            candidates["grna_strand"] == "+",
-            candidates["protospacer_start"],
-            candidates["pam_start"],
+
+        # ------------------------------------------------------------
+        # PAM scanning
+        # ------------------------------------------------------------
+        candidates = scan.scan_for_guides(
+            attribute,
+            fasta_dict,
+            window_up=pam_window_up,
+            window_down=pam_window_down,
         )
 
-        candidates["grna_23_end"] = np.where(
-            candidates["grna_strand"] == "+",
-            candidates["pam_end"],
-            candidates["protospacer_end"],
-        )
-        
-        # Check variants in gRNA in stock lines (if requested)
+        logger.add_summary("PAM scanning", candidate_coverage_summary(candidates))
+
+        if candidates.empty:
+            write_no_guide_only_output(
+                attribute=attribute,
+                run_id=run_id,
+                gtf_db_path=gtf_db_path,
+                genome_fasta_path=genome_fasta_path,
+                basename=basename,
+                outdir=outdir,
+                output_table=output_table,
+                write_csv=write_csv,
+                write_parquet=write_parquet,
+                logger=logger,
+                reason="No candidate guides found in PAM search windows.",
+            )
+            return
+
+        candidates = scan.add_grna_23_coordinates(candidates)
+
+        # ------------------------------------------------------------
+        # Optional stock-sequence compatibility annotation/filtering
+        # ------------------------------------------------------------
         if check_stock_variants:
-            print("Annotating candidate guides against stock VCFs...")
+            logger.log("Annotating candidate guides against stock VCFs...")
+
             candidates = stockcheck.annotate_stock_variants(
                 guides_df=candidates,
                 stock_vcfs=stock_vcfs,
@@ -249,13 +357,14 @@ def run_pipeline(
             removed_pam = 0
             removed_nonidentical = 0
 
-            # hard reject if PAM GG is mutated
             before = len(candidates)
             candidates = candidates[~candidates["stock_pam_gg_mutated"]].copy()
             removed_pam = before - len(candidates)
-            
+
             if removed_pam:
-                print(f"Removed {removed_pam} guides with PAM GG mutation in assigned stock.")
+                logger.log(
+                    f"Removed {removed_pam} guides with PAM GG mutation in assigned stock."
+                )
 
             if stock_identical_only:
                 before = len(candidates)
@@ -263,42 +372,89 @@ def run_pipeline(
                 removed_nonidentical = before - len(candidates)
 
                 if removed_nonidentical:
-                    print(f"Removed {removed_nonidentical} non-identical guides due to --stock_identical_only.")
+                    logger.log(
+                        f"Removed {removed_nonidentical} non-identical guides due to "
+                        "--stock_identical_only."
+                    )
+
+            logger.add_summary(
+                "Stock filtering",
+                {
+                    "removed_pam_gg_mutated": removed_pam,
+                    "removed_nonidentical": removed_nonidentical,
+                    "remaining_guides": len(candidates),
+                },
+            )
 
             if candidates.empty:
-                print("No guides remain after stock sequence filtering.")
-                logger.finish_early("No guides remain after stock sequence filtering.")
+                write_no_guide_only_output(
+                    attribute=attribute,
+                    run_id=run_id,
+                    gtf_db_path=gtf_db_path,
+                    genome_fasta_path=genome_fasta_path,
+                    basename=basename,
+                    outdir=outdir,
+                    output_table=output_table,
+                    write_csv=write_csv,
+                    write_parquet=write_parquet,
+                    logger=logger,
+                    reason="No guides remain after stock sequence filtering.",
+                )
                 return
-            
-            logger.add_summary("Stock filtering", {
-                "removed_pam_gg_mutated": removed_pam,
-                "removed_nonidentical": removed_nonidentical,
-                "remaining_guides": len(candidates),
-            })
-            
-        # Prefilter feasibility (design-aware)
-        candidates = design.prefilter_designable(candidates, fasta_dict, show_progress=True)
-        before = len(candidates)
-        candidates = candidates[candidates["designable"]].copy()
-        removed = before - len(candidates)
-        if removed:
-            print(f"Removed {removed} non-designable guides.")
-        if candidates.empty:
-            print("No designable guides after prefilter.")
-            logger.finish_early("No designable guides after prefilter.")
-            return
-        
-        logger.add_summary("Designability filtering", {
-            "removed_non_designable": removed,
-            "remaining_guides": len(candidates),
-        })
-               
-        # RS3 scoring
-        candidates = efficiency.score_rs3(
-            candidates, fasta_dict, tracrRNA=tracrRNA, batch_size=batch_size_rs3
+
+        # ------------------------------------------------------------
+        # Designability filtering
+        # ------------------------------------------------------------
+        candidates = prefilter_designable(
+            candidates,
+            fasta_dict,
+            show_progress=True,
         )
 
-        # Off-target enumeration (Cas-OFFinder)
+        before = len(candidates)
+        candidates = candidates[candidates["designable"]].copy()
+        removed_non_designable = before - len(candidates)
+
+        if removed_non_designable:
+            logger.log(f"Removed {removed_non_designable} non-designable guides.")
+
+        logger.add_summary(
+            "Designability filtering",
+            {
+                "removed_non_designable": removed_non_designable,
+                "remaining_guides": len(candidates),
+            },
+        )
+
+        if candidates.empty:
+            write_no_guide_only_output(
+                attribute=attribute,
+                run_id=run_id,
+                gtf_db_path=gtf_db_path,
+                genome_fasta_path=genome_fasta_path,
+                basename=basename,
+                outdir=outdir,
+                output_table=output_table,
+                write_csv=write_csv,
+                write_parquet=write_parquet,
+                logger=logger,
+                reason="No designable guides remain after prefilter.",
+            )
+            return
+
+        # ------------------------------------------------------------
+        # RS3 efficiency scoring
+        # ------------------------------------------------------------
+        candidates = efficiency.score_rs3(
+            candidates,
+            fasta_dict,
+            tracrRNA=tracrRNA,
+            batch_size=batch_size_rs3,
+        )
+
+        # ------------------------------------------------------------
+        # Off-target enumeration and optional filtering
+        # ------------------------------------------------------------
         if run_offtargets:
             _hits, spec = enumerate_offtargets_cas_offinder(
                 candidates,
@@ -314,139 +470,151 @@ def run_pipeline(
             )
             candidates = merge_specificity(candidates, spec, mismatches=mismatches)
 
-            # Apply mismatch-based filter (if requested)
             if min_offtarget_mismatch is not None and min_offtarget_mismatch != 0:
-                candidates = filter_by_offtarget_mismatch(candidates, min_offtarget_mismatch)
+                before = len(candidates)
+                candidates = filter_by_offtarget_mismatch(
+                    candidates,
+                    min_offtarget_mismatch,
+                )
+                removed_by_offtarget_filter = before - len(candidates)
+
+                logger.add_summary(
+                    "Off-target filtering",
+                    {
+                        "removed_by_offtarget_filter": removed_by_offtarget_filter,
+                        "remaining_guides": len(candidates),
+                    },
+                )
+
                 if candidates.empty:
-                    print("No guides remain after applying --min-offtarget-mismatch filter.")
-                    logger.finish_early("No guides remain after applying --min-offtarget-mismatch filter.")
+                    write_no_guide_only_output(
+                        attribute=attribute,
+                        run_id=run_id,
+                        gtf_db_path=gtf_db_path,
+                        genome_fasta_path=genome_fasta_path,
+                        basename=basename,
+                        outdir=outdir,
+                        output_table=output_table,
+                        write_csv=write_csv,
+                        write_parquet=write_parquet,
+                        logger=logger,
+                        reason="No guides remain after off-target filtering.",
+                    )
                     return
 
         else:
-            # Populate expected columns so downstream code and selection can run.
-            # (Selection should tolerate NaNs; if not, set conservative values here instead.)
             candidates["n_hits"] = np.nan
             for k in range(0, mismatches + 1):
                 candidates[f"n_mm{k}"] = np.nan
 
-            # If user requested an off-target filter but we didn't compute off-targets, stop early.
-            if min_offtarget_mismatch is not None and min_offtarget_mismatch != 0:
-                print("Error: --min-offtarget-mismatch requires off-target enumeration (run_offtargets=True).")
-                return
-        
         logger.add_dataframe_summary("Post off-target summary", candidates)
 
+        # ------------------------------------------------------------
+        # Homology arms, edit requirements, and silent edits
+        # ------------------------------------------------------------
+        candidates = add_homology_arms(
+            candidates,
+            fasta_dict,
+            show_progress=True,
+        )
 
-        # Design Homology Arms
-        candidates = design.add_homology_arms(candidates, fasta_dict, show_progress=True)
-
-        candidates = design.choose_arm_for_mutation(
+        candidates = choose_arm_for_mutation(
             candidates,
             protospacer_overlap_len=protospacer_overlap_len,
             coding_only=True,
             show_progress=True,
         )
 
-        candidates = design.apply_silent_edits(candidates, show_progress=True)
-
-        # Add selection score
-        candidates = add_guide_selection_score(candidates)
-
-        logger.add_dataframe_summary("Post scoring summary", candidates)
-
-        # Reduce to one guide per terminus if requested
-        if selection != "all":
-            candidates = select_one_per_tag(candidates, mode=selection)
-            if candidates.empty:
-                print("No guides remain after per-tag selection.")
-                logger.finish_early("No guides remain after per-tag selection.")
-                return
-
-        # Design validation primers
-        candidates = design.validation_primers(candidates, fasta_dict, show_progress=True)
-
-        # Ensure termini with no guide are represented in the final output
-        candidates = annotate.add_no_guide_rows(candidates, attribute)
-
-        # Add provenance
-        candidates["run_id"] = run_id
-        candidates["gtf_db_path"] = gtf_db_path
-        candidates["genome_fasta_path"] = genome_fasta_path
-
-        # Final output columns: drop internal construction fields
-        drop_columns = [
-            "spacer",
-            "pam_seq",
-            "protospacer_start",
-            "protospacer_end",
-            "pam_start",
-            "pam_end",
-            "designable",
-            "skip_reason",
-            "stock_pam_gg_mutated",
-            "HALs",
-            "HARs",
-            "HALe",
-            "HARe",
-            "HAL_pam_in_arm",
-            "HAR_pam_in_arm",
-            "HAL_pam_proximal_overlap",
-            "HAR_pam_proximal_overlap",
-        ]
-
-        drop_columns = [c for c in drop_columns if c in candidates.columns]
-        candidates = candidates.drop(columns=drop_columns)
-
-
-        # Write SQLite
-        to_sqlite(
+        candidates = apply_silent_edits(
             candidates,
-            basename,
-            outdir,
-            output_table,
-            if_exists="append",
-            index=False,
-            create_indices=True,
+            show_progress=True,
         )
 
-        # Optional snapshots
-        if write_parquet:
-            candidates.to_parquet(os.path.join(outdir, basename + '.parquet'), index=False)
-        if write_csv:
-            candidates.to_csv(os.path.join(outdir, basename + '.csv'), index=False)
+        # ------------------------------------------------------------
+        # Score all guides, optionally reduce to one guide per terminus
+        # ------------------------------------------------------------
+        candidates = add_guide_selection_score(candidates)
+        logger.add_dataframe_summary("Post scoring summary", candidates)
 
-        # Console summary
-        print(f"Finished. Wrote {len(candidates)} guides to:")
+        if selection != "all":
+            before = len(candidates)
+            candidates = select_one_per_tag(candidates, mode=selection)
+            removed_by_selection = before - len(candidates)
+
+            logger.add_summary(
+                "Guide selection",
+                {
+                    "selection_mode": selection,
+                    "removed_by_selection": removed_by_selection,
+                    "remaining_guides": len(candidates),
+                },
+            )
+
+            if candidates.empty:
+                write_no_guide_only_output(
+                    attribute=attribute,
+                    run_id=run_id,
+                    gtf_db_path=gtf_db_path,
+                    genome_fasta_path=genome_fasta_path,
+                    basename=basename,
+                    outdir=outdir,
+                    output_table=output_table,
+                    write_csv=write_csv,
+                    write_parquet=write_parquet,
+                    logger=logger,
+                    reason="No guides remain after guide selection.",
+                )
+                return
+
+        # ------------------------------------------------------------
+        # Validation primers are designed after optional selection so expensive
+        # primer design is only run for retained guide rows.
+        # ------------------------------------------------------------
+        candidates = design_validation_primers(
+            candidates,
+            fasta_dict,
+            show_progress=True,
+        )
+
+        # ------------------------------------------------------------
+        # Add explicit rows for termini that have no retained guide.
+        # ------------------------------------------------------------
+        candidates = add_no_guide_rows(candidates, attribute)
+
+        candidates = add_provenance(
+            candidates,
+            run_id=run_id,
+            gtf_db_path=gtf_db_path,
+            genome_fasta_path=genome_fasta_path,
+        )
+
+        candidates = drop_internal_columns(candidates)
+
+        # ------------------------------------------------------------
+        # Persist outputs
+        # ------------------------------------------------------------
+        write_outputs(
+            candidates,
+            basename=basename,
+            outdir=outdir,
+            output_table=output_table,
+            write_csv=write_csv,
+            write_parquet=write_parquet,
+        )
+
+        print(f"Finished. Wrote {len(candidates)} rows to:")
         print(f"   - {outdir + '/' + basename + '.sqlite'} (table: {output_table})")
         if write_parquet:
             print(f"   - {outdir + '/' + basename + '.parquet'}")
         if write_csv:
             print(f"   - {outdir + '/' + basename + '.csv'}")
 
-        print("\nInput summary:")
-        print(f"  Genes analysed: {n_genes}")
-        print(f"  Total termini: {n_termini}")
+        final_summary = final_output_summary(candidates)
 
-        if termini_counts:
-            for term, count in sorted(termini_counts.items()):
-                print(f"    {term}-termini: {count}")
-        
-        print("\nPost-filter summary:")
-        guide_mask = candidates["guide_found"].fillna(True).astype(bool)
-        print(f"  Output rows: {len(candidates)}")
-        print(f"  Guide rows: {int(guide_mask.sum())}")
-        print(f"  No-guide termini: {int((~guide_mask).sum())}")
-        print(f"  Genes with guides: {candidates.loc[guide_mask, 'gene_id'].nunique()}")
-        print(f"  Termini with guides: {candidates.loc[guide_mask, ['gene_id', 'tag']].drop_duplicates().shape[0]}")
-
-        logger.add_summary("Input summary", {
-        "genes_analysed": n_genes,
-        "total_termini": n_termini,
-        "termini_counts": termini_counts,
-        })
+        print_summary_block("Input summary", input_summary)
+        print_summary_block("Final output summary", final_summary)
 
         logger.add_dataframe_summary("Final output summary", candidates)
-
         logger.success()
 
     except Exception as e:
