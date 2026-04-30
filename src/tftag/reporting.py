@@ -1,6 +1,8 @@
+from __future__ import annotations
 import pandas as pd
 import numpy as np
 import os
+from .runlog import TFTagRunLogger
 
 
 def add_no_guide_rows(
