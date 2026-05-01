@@ -34,7 +34,11 @@ from .genome_io import create_gtf_db, load_fasta_dict
 from .helpers import filter_by_offtarget_mismatch, parse_genes_arg
 from .off_targeting import enumerate_offtargets_cas_offinder, merge_specificity
 from .runlog import TFTagRunLogger
-from .select import add_guide_selection_score, select_one_per_tag
+from .select import (
+    DEFAULT_SCORING_WEIGHTS,
+    add_guide_selection_score,
+    select_one_per_tag,
+)
 from .reporting import (
     add_no_guide_rows,
     add_provenance,
@@ -102,6 +106,7 @@ def make_run_parameters(
         "min_offtarget_mismatch": min_offtarget_mismatch,
         "offtarget_batch_size": offtarget_batch_size,
         "selection": selection,
+        "guide_selection_weights": DEFAULT_SCORING_WEIGHTS,
         "write_csv": write_csv,
         "write_parquet": write_parquet,
         "check_stock_vcf_compatibility": check_stock_vcf_compatibility,
@@ -535,6 +540,7 @@ def run_pipeline(
         # Score all guides, optionally reduce to one guide per terminus
         # ------------------------------------------------------------
         candidates = add_guide_selection_score(candidates)
+        logger.add_summary("Guide scoring weights", DEFAULT_SCORING_WEIGHTS)
         logger.add_dataframe_summary("Post scoring summary", candidates)
 
         if selection != "all":

@@ -51,6 +51,14 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+DEFAULT_SCORING_WEIGHTS = {
+    "w_cut": 0.25,
+    "w_rs3": 0.20,
+    "w_offtarget": 0.40,
+    "w_edit": 0.15,
+    "max_cut_distance": 30,
+    "dist_decay": 10,
+}
 
 def _first_present(df: pd.DataFrame, candidates: list[str]) -> str | None:
     """Return the first candidate column present in df.columns."""
@@ -120,11 +128,12 @@ def _offtarget_tiebreaker_columns(df: pd.DataFrame) -> list[str]:
 def add_guide_selection_score(
     df: pd.DataFrame,
     *,
-    max_cut_distance: int = 30,
-    w_cut: float = 0.25,
-    w_rs3: float = 0.20,
-    w_offtarget: float = 0.40,
-    w_edit: float = 0.15,
+    max_cut_distance: int = DEFAULT_SCORING_WEIGHTS["max_cut_distance"],
+    w_cut: float = DEFAULT_SCORING_WEIGHTS["w_cut"],
+    w_rs3: float = DEFAULT_SCORING_WEIGHTS["w_rs3"],
+    w_offtarget: float = DEFAULT_SCORING_WEIGHTS["w_offtarget"],
+    w_edit: float = DEFAULT_SCORING_WEIGHTS["w_edit"],
+    dist_decay: float = DEFAULT_SCORING_WEIGHTS["dist_decay"],
 ) -> pd.DataFrame:
     """
     Add guide-selection fields.
@@ -193,7 +202,7 @@ def add_guide_selection_score(
     # 2. Cut-distance component
     # ------------------------------------------------------------
     cut = pd.to_numeric(out["cut_distance"], errors="coerce").fillna(max_cut_distance)
-    cut_score = np.exp(-cut / 10) # exponential decay; 1.0 at distance=0, ~0.37 at distance=10, ~0.14 at distance=20, ~0.05 at distance=30
+    cut_score = np.exp(-cut / dist_decay) # exponential decay; 1.0 at distance=0, ~0.37 at distance=10, ~0.14 at distance=20, ~0.05 at distance=30
 
     # ------------------------------------------------------------
     # 3. RS3 efficiency component (log-odds → probability)
