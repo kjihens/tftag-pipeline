@@ -535,22 +535,46 @@ def apply_silent_edits(
 
         did_edit = False
 
+        # ---------- (1) Try single synonymous mutation in PAM GG only ----------
+        # PAM in guide orientation occupies positions:
+        #   21 = N
+        #   22 = G
+        #   23 = G
+        #
+        # Mutating position 21 does not break SpCas9 NGG recognition, so we only
+        # attempt synonymous edits at guide-PAM indices 1 and 2.
+        
         pam_seq_guide = str(rowd.get("pam_seq", "")).upper()
-        pam_positions = list(range(pam_s, pam_e + 1))
-        pam_idxs = _indices_within_arm(arm_start, arm_end, gene_strand, pam_positions)
 
-        if len(pam_idxs) == 3 and len(pam_seq_guide) == 3:
-            g_positions = [i for i, base in enumerate(pam_seq_guide) if base == "G"]
-            guide_order = g_positions + [i for i in range(3) if i not in g_positions]
+        if len(pam_seq_guide) == 3:
+            pam_gg_guide_indices = [
+                guide_idx
+                for guide_idx, base in enumerate(pam_seq_guide)
+                if guide_idx in (1, 2) and base == "G"
+            ]
 
-            for guide_idx in guide_order:
-                gpos = pam_s + guide_idx if grna_strand == "+" else pam_e - guide_idx
-                arm_idx = _genomic_to_coding_index(gpos, arm_start, arm_end, gene_strand)
+            for guide_idx in pam_gg_guide_indices:
+                if grna_strand == "+":
+                    gpos = pam_s + guide_idx
+                else:
+                    gpos = pam_e - guide_idx
+
+                arm_idx = _genomic_to_coding_index(
+                    gpos,
+                    arm_start,
+                    arm_end,
+                    gene_strand,
+                )
 
                 if arm_idx is None:
                     continue
 
-                attempt = _try_synonymous_change(arm_seq, arm_idx, anchor=anchor)
+                attempt = _try_synonymous_change(
+                    arm_seq,
+                    arm_idx,
+                    anchor=anchor,
+                )
+
                 if attempt is not None:
                     arm_seq, rec = attempt
                     append_mut(rec)
