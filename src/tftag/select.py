@@ -393,7 +393,7 @@ def select_one_per_tag(df: pd.DataFrame, mode: str = "all") -> pd.DataFrame:
             kind="mergesort",
         )
 
-        return df2.drop_duplicates(group_cols, keep="first").reset_index(drop=True)
+        return df2.drop_duplicates(group_cols, keep="first")
 
     # ------------------------------------------------------------
     # Legacy/simple modes
@@ -423,4 +423,4 @@ def select_one_per_tag(df: pd.DataFrame, mode: str = "all") -> pd.DataFrame:
         kind="mergesort",
     )
 
-    return df2.drop_duplicates(group_cols, keep="first").reset_index(drop=True)
+    return df2.drop_duplicates(group_cols, keep="first")
