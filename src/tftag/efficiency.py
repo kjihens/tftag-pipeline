@@ -135,11 +135,11 @@ def score_rs3(
     has_designable = "designable" in df.columns
 
     for pos, row in iterator:
-        designable_mask = (
-            df["designable"].fillna(False).astype(bool)
-            if "designable" in df.columns
-            else pd.Series(True, index=df.index)
-)
+        if "designable" in df.columns:
+            designable_mask = df["designable"].astype("boolean").fillna(False)
+        else:
+            designable_mask = pd.Series(True, index=df.index, dtype="boolean")
+
         if not designable_mask.iat[pos]:
             continue
 
