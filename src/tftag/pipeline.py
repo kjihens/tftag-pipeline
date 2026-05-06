@@ -431,7 +431,7 @@ def run_pipeline(
             rejected_nonidentical = 0
 
             if stock_identical_only:
-                nonidentical = ~candidates["stock_seq_matches_ref"].fillna(False).astype(bool)
+                nonidentical = ~candidates["stock_seq_matches_ref"].astype("boolean").fillna(False)
                 rejected_nonidentical = int(nonidentical.sum())
 
                 candidates = mark_rejected(
@@ -470,7 +470,7 @@ def run_pipeline(
                 show_progress=True,
             )
 
-            non_designable = ~work["designable"].fillna(False).astype(bool)
+            non_designable = ~work["designable"].astype("boolean").fillna(False)
             rejected_non_designable = int(non_designable.sum())
 
             work = mark_rejected(
@@ -588,7 +588,7 @@ def run_pipeline(
             # choose_arm_for_mutation uses `rejected=True` for guides requiring
             # edits in the non-coding arm. Convert that internal flag into the
             # general guide-status model.
-            noncoding_edit = work["rejected"].fillna(False).astype(bool)
+            noncoding_edit = work["rejected"].astype("boolean").fillna(False)
             rejected_noncoding_edit = int(noncoding_edit.sum())
 
             work = mark_rejected(

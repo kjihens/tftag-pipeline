@@ -52,7 +52,7 @@ def mark_rejected(
     Existing rejection reasons are preserved.
     """
     out = df.copy()
-    mask = pd.Series(mask, index=out.index).fillna(False).astype(bool)
+    mask = pd.Series(mask, index=out.index).astype("boolean").fillna(False)
 
     out.loc[mask, "guide_status"] = REJECTED
     out.loc[mask, "guide_found"] = True

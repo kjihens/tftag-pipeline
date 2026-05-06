@@ -131,3 +131,16 @@ def filter_by_offtarget_mismatch(
         keep &= df[cols].apply(pd.to_numeric, errors="coerce").fillna(0).eq(0).all(axis=1)
 
     return df.loc[keep].copy()
+
+def offtarget_keep_mask(
+    df: pd.DataFrame,
+    min_mismatch: int | None,
+    *,
+    max_mismatches: int | None = None,
+) -> pd.Series:
+    kept = filter_by_offtarget_mismatch(
+        df,
+        min_mismatch,
+        max_mismatches=max_mismatches,
+    )
+    return df.index.isin(kept.index)

@@ -186,7 +186,7 @@ def add_guide_selection_score(
     n_mm0 = pd.to_numeric(out["n_mm0"], errors="coerce").fillna(1)
     multi_perfect = n_mm0 > 1
 
-    rejected = out["rejected"].fillna(False).astype(bool)
+    rejected = out["rejected"].astype("boolean").fillna(False)
 
     out.loc[multi_perfect, "selection_tier"] = np.maximum(
         out.loc[multi_perfect, "selection_tier"],

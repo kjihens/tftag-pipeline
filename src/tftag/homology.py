@@ -169,7 +169,7 @@ def add_homology_arms(
     if missing:
         raise ValueError(f"add_homology_arms missing required columns: {missing}")
 
-    designable_mask = df["designable"].fillna(False).astype(bool)
+    designable_mask = df["designable"].astype("boolean").fillna(False)
     if not designable_mask.any():
         return df
 

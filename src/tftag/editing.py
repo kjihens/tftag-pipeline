@@ -259,7 +259,7 @@ def choose_arm_for_mutation(
     if "designable" not in df.columns:
         df["designable"] = True
 
-    designable_mask = df["designable"].fillna(False).astype(bool)
+    designable_mask = df["designable"].astype("boolean").fillna(False)
     if not designable_mask.any():
         return df
 
@@ -453,7 +453,7 @@ def apply_silent_edits(
     if "designable" not in df.columns:
         df["designable"] = True
 
-    designable_mask = df["designable"].fillna(False).astype(bool)
+    designable_mask = df["designable"].astype("boolean").fillna(False)
     if not designable_mask.any():
         return df
 

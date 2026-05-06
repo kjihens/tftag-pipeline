@@ -207,7 +207,7 @@ def design_validation_primers(
     df["PCR2_reverse_primer_GC"] = np.nan
     df["PCR2_reverse_primer_len"] = np.nan
 
-    designable_mask = df["designable"].fillna(False).astype(bool)
+    designable_mask = df["designable"].astype("boolean").fillna(False)
     bad_mask = ~designable_mask
 
     df.loc[bad_mask, "warnings"] = df.loc[bad_mask, "warnings"].apply(
