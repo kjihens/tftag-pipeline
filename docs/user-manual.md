@@ -2,93 +2,184 @@
 
 ## 1. Overview
 
-**TFTag** is a Python pipeline for genome-wide or targeted design of CRISPR–Cas9 gRNAs and homology arms for **N- and C-terminal gene tagging**.
+**TFTag** is a Python pipeline for large-scale or targeted CRISPR/Cas9 donor and guide RNA design for endogenous protein tagging in *Drosophila melanogaster*.
 
-It produces a **queryable SQLite database** (plus Parquet/CSV) that supports:
+The pipeline was designed primarily for the TFTag resource, which aims to systematically tag all *Drosophila* transcription factors at their endogenous loci, but it is broadly applicable to any gene set.
 
-* experimental guide selection
-* large-scale resource generation
-* programmatic querying
+TFTag integrates:
 
-### Contents
+* transcript-aware annotation parsing,
+* strand-aware gRNA discovery,
+* stock-specific sequence validation,
+* off-target analysis,
+* donor engineering,
+* splice-aware synonymous blocking mutation design,
+* guide ranking and prioritisation,
+* large-scale reproducible output generation.
 
-1. Overview  
-2. Key Features  
-3. Installation  
-4. Inputs  
-5. Pipeline stages  
-6. Output database and schema  
-8. Querying the SQLite database  
-9. Guide selection recommendations  
-10. Performance considerations  
-11. Troubleshooting  
-12. Reproducibility and best practices  
+The pipeline produces:
+
+* an indexed SQLite database,
+* Parquet files,
+* CSV tables,
+* structured JSON provenance logs,
+* human-readable run logs.
+
+The system is explicitly designed for:
+
+* genome-scale resource generation,
+* high-throughput CRISPR engineering,
+* reproducibility,
+* explainable filtering,
+* downstream programmatic querying.
+
+All genomic coordinates are represented internally as **1-based inclusive coordinates**.
 
 ---
 
-## 2. Key Features
+# 2. Design Philosophy
 
-### Core design
+TFTag was developed around several core principles.
 
-* N- and C-terminal tagging (start/stop codons)
-* Strand-aware gRNA discovery
-* 240 bp homology arms (gene orientation)
-* Synonymous mutation design to prevent re-cutting
+## 2.1 Explicit Coordinate Handling
+
+CRISPR design pipelines frequently obscure strand orientation and coordinate conventions.
+
+TFTag instead:
+
+* stores all genomic intervals explicitly,
+* tracks PAM and protospacer coordinates separately,
+* stores gRNA sequences in guide orientation,
+* preserves strand-aware interpretation throughout the pipeline.
+
+This substantially reduces ambiguity during downstream analysis.
+
+---
+
+## 2.2 Transcript-Aware Biology
+
+The pipeline operates at the level of transcript-supported termini rather than simplistic gene-level models.
+
+TFTag therefore:
+
+* groups compatible start/stop codons into termini,
+* tracks transcript and isoform support,
+* evaluates splice-aware edit safety,
+* reconstructs CDS structures for readthrough detection.
+
+This is particularly important for:
+
+* alternatively spliced genes,
+* compact insect genomes,
+* exon-intron structures near tagging sites.
+
+---
+
+## 2.3 Reproducibility
+
+Every major design decision is recorded explicitly.
+
+The pipeline preserves:
+
+* rejected guides,
+* rejection reasons,
+* warning states,
+* scoring weights,
+* run parameters,
+* provenance metadata.
+
+This allows complete post hoc reconstruction of guide selection decisions.
+
+---
+
+## 2.4 Conservative Donor Engineering
+
+TFTag prioritises biologically safe donor design.
+
+The pipeline therefore:
+
+* avoids unnecessary donor mutations,
+* rejects edits in non-coding regions by default,
+* checks splice-site overlap,
+* prefers minimal synonymous sequence perturbation,
+* supports codon-usage-aware silent edits.
+
+---
+
+# 3. Key Features
+
+## Core CRISPR Design
+
+* N-terminal and C-terminal tagging
+* Strand-aware SpCas9 NGG scanning
+* Explicit PAM/protospacer coordinate handling
+* HDR donor design
 * Validation primer design
+* Composite guide ranking
 
-### Annotation improvements
+---
 
-* Terminus-level grouping (`N1`, `C1`, etc.)
-* Mapping of:
+## Transcript-Aware Annotation
 
-  * transcripts (`FBtr`)
-  * isoforms (`-RA`, `-RB`, etc.)
-* Detection of **potential stop-codon readthrough**
+* Terminus grouping (`N1`, `C1`, etc.)
+* Transcript-aware codon grouping
+* Isoform tracking
+* Translation-based readthrough detection
+* Splice-aware edit safety annotation
 
-### Scoring and selection (new)
+---
 
-* Composite **guide selection score**
-* Tiered selection system:
-
-  * Tier 0: standard guides
-  * Tier 1: multi-perfect-match guides
-  * Tier 2: non-coding edit required (last resort)
-* Chromosome-aware off-target scoring
-
-### Off-target analysis (enhanced)
+## Off-Target Analysis
 
 * Cas-OFFinder integration
-* Per-mismatch counts (`n_mm*`)
-* Chromosome-aware counts:
-
-  * `n_mm*_same_chr`
-  * `n_mm*_other_chr`
-
-### Output formats
-
-* SQLite (indexed, queryable)
-* Parquet (analysis)
-* CSV (human-readable)
+* Per-mismatch off-target counts
+* Same-chromosome vs other-chromosome separation
+* Strict uniqueness filtering
+* Composite specificity scoring
 
 ---
 
-## 3. Installation
+## Stock-Aware Design
 
-### 3.1 Clone the repository
+* VCF compatibility checking
+* Stock-specific guide reconstruction
+* PAM mutation detection
+* Chromosome-specific stock assignment
+
+---
+
+## Large-Scale Output Support
+
+* SQLite database generation
+* Indexed query support
+* CSV export
+* Parquet export
+* JSON provenance logs
+
+---
+
+# 4. Installation
+
+## 4.1 Clone Repository
 
 ```bash
 git clone https://github.com/kjihens/tftag-pipeline.git
 cd tftag-pipeline
 ```
 
-### 3.2 Create Conda environment
+---
+
+## 4.2 Create Conda Environment
 
 ```bash
 conda env create -f environment.yml
 conda activate tftag
 ```
 
-### 3.3 Install TFTag
+---
+
+## 4.3 Install TFTag
+
 ```bash
 pip install -e .
 ```
@@ -101,209 +192,692 @@ tftag --help
 
 ---
 
-## 4. Inputs
+# 5. Inputs
 
-### 4.1 Genome annotation (GTF/GFF)
+## 5.1 Genome Annotation (GTF/GFF)
 
-- Provided via `--gtf`  
-- Must include:
+Provided using:
 
-    * `start_codon`
-    * `stop_codon`
-    * `transcript_id`
-    * `transcript_symbol`
+```bash
+--gtf annotation.gtf
+```
 
-- A `gffutils` database will be created automatically (or reused)  
+The annotation must contain:
+
+* `start_codon`
+* `stop_codon`
+* transcript identifiers
+* exon structures
+
+TFTag automatically creates and caches a `gffutils` database.
+
+### Important assumptions
+
+The pipeline assumes:
+
+* CDS structures are valid,
+* transcript exon ordering is correct,
+* chromosome names match the FASTA.
 
 ---
 
-### 4.2 Reference genome (FASTA)
+## 5.2 Reference Genome FASTA
 
-- Provided via `--fasta`  
-- Chromosome/contig names must match the annotation  
+Provided using:
+
+```bash
+--fasta genome.fasta
+```
+
+Requirements:
+
+* chromosome names must match the annotation,
+* FASTA should represent the same genome build as the GTF.
 
 ---
 
-### 4.3 Gene selection
+## 5.3 Gene Selection
 
-Optional. If omitted, **all genes** in the GTF database are processed.
+Optional.
+
+If omitted, all genes are processed.
 
 Accepted formats:
-- Path to a file with one gene ID per line  
-- Comma-separated list of gene IDs 
-
-Gene identifiers must match those in the annotation database.
-
-Examples:
 
 ```bash
 --genes genes.txt
+```
+
+or:
+
+```bash
 --genes "FBgn0000008,FBgn0000017"
 ```
 
 ---
 
-### 4.4 Selection modes
+## 5.4 Stock VCF Input
 
-Optional. If omitted, **all guides** that were identified will be included.
+TFTag supports stock-aware design using VCF files.
+
+Example:
 
 ```bash
---select-mode all
---select-mode closest
---select-mode rs3
---select-mode score
+--stock-vcf attP40=Cas9_on_2.vcf.gz
+--stock-vcf attP2=Cas9_on_3.vcf.gz
 ```
 
-- all (default): Show all.
-- closest: Chooses the guide cutting nearest to the start/stop codon.
-- rs3: Chooses the guide with the best efficiency as predicted by rs3.
-- score: Chooses the guide with the score
+Chromosome assignment:
 
----
-
-## 5. Pipeline stages
-
-### 5.1 Stage A: Annotation parsing
-
-- Builds or loads a `gffutils` database  
-- Extracts start/stop codons  
-- Assigns N/C tag identifiers (N1, C1, …)  
-
-Adds:
-
-* `terminus_transcripts`
-* `terminus_isoforms`
-* `potential_readthrough`
-
----
-
-### 5.2 Stage B: PAM scanning
-
-- Scans ±window around each codon  
-- Identifies NGG PAMs on both strands  
-- Computes cut site and distance to codon 
-
----
-
-### 5.3 Stage C: Designability prefilter
-
-Rejects guides if:
-- Homology arms extend beyond contig boundaries  
-- Primer windows cannot be accommodated  
-
----
-
-### 5.4 Stage D: RS3 scoring
-
-- Computes RS3 score using 30-mer context  
-- Adds warnings if unavailable  
-
----
-
-### 5.5 Stage E: Off-target analysis
-
-- Runs Cas-OFFinder  
-- Summarizes mismatch counts  
-
-Adds:
-
-| Column          | Meaning                      |
-| --------------- | ---------------------------- |
-| n_mm0           | total 0-mismatch, should be at least 1    |
-| n_mm1           | total 1-mismatch off-targets |
-| n_mm1_same_chr  | same chromosome              |
-| n_mm1_other_chr | other chromosomes            |
-
----
-
-### 5.6 Stage F: Homology arms
-
-* 240 bp HAL/HAR
-* gene-oriented sequences
-
----
-
-### 5.7 Stage G: Silent edits
-
-* Applied only if:
-
-  * PAM + ≥13 bp spacer overlap contained in HAL or HAR
-* Coding edits preferred
-* Non-coding edits rejected
-
----
-
-### 5.8 Stage H: Guide scoring
-
-See section 8 for in-depth explanation
-
-Components:
-
-#### Distance
-
-```
-exp(-cut_distance / 10)
+```bash
+--stock-group attP40=3L,3R
+--stock-group attP2=2L,2R,X
 ```
 
-#### Off-target
+This allows the pipeline to:
 
+* reconstruct stock-specific guide sequences,
+* identify PAM-disrupting polymorphisms,
+* reject incompatible guides.
+
+---
+
+## 5.5 Selection Modes
+
+```bash
+--selection all
+--selection closest
+--selection rs3
+--selection score
 ```
-1 / (1 + weighted penalty)
+
+### Modes
+
+| Mode      | Behaviour                            |
+| --------- | ------------------------------------ |
+| `all`     | Keep all guides                      |
+| `closest` | Keep guide nearest to codon          |
+| `rs3`     | Keep guide with best RS3 score       |
+| `score`   | Keep guide with best composite score |
+
+---
+
+# 6. Pipeline Architecture
+
+The pipeline is divided into distinct stages.
+
+---
+
+# 6.1 Stage A — Annotation Parsing
+
+The annotation module:
+
+1. loads the GTF database,
+2. extracts start/stop codons,
+3. groups compatible termini,
+4. associates transcripts and isoforms.
+
+## Terminus grouping
+
+Multiple transcripts may share the same physical terminus.
+
+TFTag therefore groups termini into labels such as:
+
+| Label | Meaning                 |
+| ----- | ----------------------- |
+| `N1`  | first unique N-terminus |
+| `C1`  | first unique C-terminus |
+
+---
+
+## Translation-Based Readthrough Detection
+
+The previous heuristic readthrough detection system has been replaced.
+
+The pipeline now:
+
+1. reconstructs transcript CDS structures,
+2. appends the annotated stop codon,
+3. translates the CDS,
+4. evaluates stop codon behaviour directly.
+
+### Output states
+
+| Status                                    | Meaning                        |
+| ----------------------------------------- | ------------------------------ |
+| `clean_terminal_stop`                     | Single terminal stop codon     |
+| `internal_stop_plus_terminal_stop`        | Premature stop codons detected |
+| `no_stop_in_translation`                  | Translation lacks valid stop   |
+| `queried_stop_does_not_translate_as_stop` | Annotated stop not recognised  |
+
+### Output columns
+
+| Column                      | Meaning                   |
+| --------------------------- | ------------------------- |
+| `potential_readthrough`     | TRUE/FALSE                |
+| `stop_translation_status`   | Translation QC result     |
+| `stop_translation_evidence` | Transcript-level evidence |
+| `readthrough_transcripts`   | Affected transcript IDs   |
+
+---
+
+# 6.2 Stage B — PAM Scanning
+
+The scanner searches both strands for SpCas9 NGG sites.
+
+## Coordinate representation
+
+Each guide stores:
+
+| Column                  | Meaning                    |
+| ----------------------- | -------------------------- |
+| `protospacer_start/end` | 20 nt spacer coordinates   |
+| `pam_start/end`         | PAM coordinates            |
+| `grna_seq_23`           | Full 23-mer guide sequence |
+| `spacer`                | 20 nt spacer               |
+| `pam_seq`               | PAM sequence               |
+| `grna_strand`           | Target strand              |
+| `cut_pos`               | Cas9 cleavage position     |
+| `cut_distance`          | Distance to codon          |
+
+The 23-mer is always stored in guide orientation.
+
+---
+
+## Search Window Design
+
+The scanner expands beyond the nominal codon window.
+
+This prevents guides from being missed when:
+
+* the PAM lies inside the search window,
+* but part of the spacer extends outside it.
+
+---
+
+## Maximum Cut Distance Filtering
+
+Optional:
+
+```bash
+--max-cut-distance 15
 ```
 
-#### RS3
+This removes guides whose cut site is too far from the insertion point.
 
-(logistic-transformed)
+Motivation:
 
-#### Edit score
-
-| Case            | Score |
-| --------------- | ----- |
-| no edit         | 1.0   |
-| coding edit     | 0.7   |
-| non-coding edit | 0.1   |
+HDR efficiency generally decreases with increasing cut distance.
 
 ---
 
-### Stage I: Tier assignment
+# 6.3 Stage C — Stock-Aware Sequence Checking
 
-| Tier | Meaning                  |
-| ---- | ------------------------ |
-| 0    | preferred                |
-| 1    | multiple perfect matches |
-| 2    | rejected                 |
+The stock-check module reconstructs guide sequences after applying VCF variants.
 
----
+## Behaviour
 
-### Stage J: Missing guides
+For each guide:
 
-If no guide exists:
-
-* row added
-* `no_guide = TRUE`
+1. overlapping variants are fetched,
+2. stock-specific sequence is reconstructed,
+3. PAM integrity is evaluated.
 
 ---
 
-## 6. Output database
+## Rejection conditions
 
-### Key columns
-
-| Category    | Columns                                 |
-| ----------- | --------------------------------------- |
-| Gene        | gene_id, gene_symbol, tag               |
-| Isoforms    | terminus_transcripts, terminus_isoforms |
-| Readthrough | potential_readthrough                   |
-| Guide       | grna_seq_23                             |
-| Off-target  | n_mm*, n_mm*_same_chr                   |
-| Score       | selection_score, selection_tier         |
-| QC          | warnings, selection_warning             |
-| Primers     | PCR1_forward_primer_seq, PCR2_reverse_primer_seq |
+| Reason                     | Meaning                      |
+| -------------------------- | ---------------------------- |
+| `stock_pam_gg_mutated`     | PAM GG disrupted             |
+| `stock_nonidentical_23mer` | Guide differs from reference |
 
 ---
 
-## 7. Query examples
+# 6.4 Stage D — Designability Filtering
 
-### Best guides
+The donor prefilter evaluates whether a guide can realistically support donor construction.
+
+Guides are rejected if:
+
+* homology arms extend beyond contig boundaries,
+* validation primer windows cannot be constructed,
+* required intervals exceed chromosome limits.
+
+## Designability outputs
+
+| Column        | Meaning     |
+| ------------- | ----------- |
+| `designable`  | TRUE/FALSE  |
+| `skip_reason` | Explanation |
+
+---
+
+# 6.5 Stage E — RS3 Efficiency Scoring
+
+TFTag uses Rule Set 3 (RS3) scoring.
+
+## 30-mer construction
+
+The RS3 sequence context is:
+
+```text
+4 nt upstream
+20 nt spacer
+3 nt PAM
+3 nt downstream
+```
+
+The sequence is always generated in guide orientation.
+
+---
+
+## Output columns
+
+| Column         | Meaning            |
+| -------------- | ------------------ |
+| `rs3_30mer`    | RS3 input sequence |
+| `rs3_score`    | Raw RS3 score      |
+| `rs3_tracrRNA` | tracrRNA model     |
+
+---
+
+# 6.6 Stage F — Off-Target Analysis
+
+Off-target enumeration is performed using Cas-OFFinder.
+
+## Mismatch counting
+
+The pipeline stores exact mismatch counts:
+
+| Column  | Meaning         |
+| ------- | --------------- |
+| `n_mm0` | Perfect matches |
+| `n_mm1` | 1-mismatch hits |
+| `n_mm2` | 2-mismatch hits |
+| `n_mm3` | 3-mismatch hits |
+| `n_mm4` | 4-mismatch hits |
+
+Additional chromosome-aware summaries:
+
+| Column            | Meaning           |
+| ----------------- | ----------------- |
+| `n_mm1_same_chr`  | Same chromosome   |
+| `n_mm1_other_chr` | Other chromosomes |
+
+---
+
+## Strict uniqueness filtering
+
+```bash
+--min-offtarget-mismatch -1
+```
+
+Requires:
+
+* exactly one perfect genomic hit,
+* no off-targets within searched mismatch space.
+
+---
+
+# 6.7 Stage G — Homology Arm Construction
+
+TFTag constructs:
+
+| Arm   | Meaning            |
+| ----- | ------------------ |
+| `HAL` | Left homology arm  |
+| `HAR` | Right homology arm |
+
+Default length:
+
+```text
+240 bp
+```
+
+Both genomic and gene-oriented sequences are stored.
+
+---
+
+# 6.8 Stage H — Edit-Arm Determination
+
+The donor is evaluated for potential Cas9 re-cutting.
+
+## Core rule
+
+An arm requires editing only if it contains:
+
+1. the complete PAM,
+2. at least N PAM-proximal spacer bases.
+
+Default:
+
+```text
+13 PAM-proximal bases
+```
+
+This substantially reduces unnecessary donor editing.
+
+---
+
+## Coding-only restriction
+
+By default:
+
+* coding edits are allowed,
+* non-coding edits are rejected.
+
+This avoids introducing uncertain regulatory mutations.
+
+---
+
+# 6.9 Stage I — Splice-Aware Edit Safety
+
+The splice-check module evaluates whether proposed blocking mutations overlap biologically sensitive regions.
+
+## Important design decision
+
+The system only flags edits if the mutation itself overlaps:
+
+* intronic sequence,
+* splice donor sites,
+* splice acceptor sites.
+
+It does NOT penalise:
+
+* exons overlapping introns of alternative isoforms,
+* exon overlap with unrelated genes,
+* transcript structures unaffected by the mutation.
+
+This greatly reduces false positive splice warnings.
+
+---
+
+## Splice-related output columns
+
+| Column                      | Meaning                    |
+| --------------------------- | -------------------------- |
+| `edit_overlaps_splice_site` | TRUE/FALSE                 |
+| `edit_overlaps_intron`      | TRUE/FALSE                 |
+| `splice_risk`               | Combined splice annotation |
+| `splice_risk_details`       | Human-readable explanation |
+
+---
+
+# 6.10 Stage J — Silent Blocking Mutation Design
+
+TFTag attempts to prevent donor re-cutting using synonymous edits.
+
+---
+
+## Biological rationale
+
+Experimental evidence suggests blocking mutations are most effective in:
+
+* the PAM,
+* the four spacer bases closest to the PAM.
+
+TFTag therefore prioritises mutations in these regions.
+
+---
+
+## Mutation hierarchy
+
+### Tier 1 — PAM GG mutation
+
+Attempt one synonymous mutation in:
+
+* PAM position 22,
+* PAM position 23.
+
+PAM position 21 is not prioritised because it usually preserves NGG recognition.
+
+---
+
+### Tier 2 — PAM-proximal spacer mutation
+
+Attempt one synonymous mutation in the four PAM-proximal spacer positions.
+
+---
+
+### Tier 3 — Dual distal mutations
+
+If no high-efficiency blocking mutation exists:
+
+* introduce two synonymous mutations elsewhere in the protospacer.
+
+---
+
+## Mutation reporting
+
+| Column                 | Meaning                    |
+| ---------------------- | -------------------------- |
+| `edit_priority`        | Blocking strategy used     |
+| `n_blocking_mutations` | Number of edits introduced |
+
+Example values:
+
+| Value                 | Meaning                      |
+| --------------------- | ---------------------------- |
+| `pam_gg_single`       | Single PAM mutation          |
+| `pam_proximal_single` | Single PAM-proximal mutation |
+| `double_distal`       | Two distal mutations         |
+| `none_possible`       | No synonymous edit possible  |
+
+---
+
+# 6.11 Stage K — Codon Usage-Aware Synonymous Editing
+
+TFTag supports codon-aware synonymous mutation selection.
+
+## Motivation
+
+Synonymous codons are not biologically equivalent.
+
+Codon substitutions may influence:
+
+* translation efficiency,
+* mRNA stability,
+* co-translational folding.
+
+---
+
+## Codon usage table generation
+
+The pipeline can:
+
+1. reconstruct CDS sequences,
+2. calculate genome-wide codon frequencies,
+3. cache codon usage tables.
+
+If a cached table already exists:
+
+* recalculation is skipped.
+
+---
+
+## Silent mutation optimisation modes
+
+### Codon-usage preserving mode
+
+Choose synonymous codons whose usage frequency most closely matches the original codon.
+
+### GC-preserving mode
+
+Fallback/default mode.
+
+Chooses synonymous codons that preserve GC content most closely.
+
+This minimises sequence perturbation.
+
+---
+
+# 6.12 Stage L — Composite Guide Scoring
+
+TFTag assigns:
+
+* a composite `selection_score`,
+* a `selection_tier`.
+
+The ranking system integrates:
+
+* HDR geometry,
+* specificity,
+* efficiency,
+* donor engineering complexity,
+* splice safety.
+
+---
+
+# 7. Guide Scoring System
+
+## 7.1 Scoring Philosophy
+
+The scoring system combines:
+
+* hard biological constraints,
+* soft prioritisation metrics.
+
+Hard constraints determine the tier.
+
+Soft metrics determine ranking within the tier.
+
+---
+
+## 7.2 Distance Component
+
+Guides closer to the insertion site are preferred.
+
+```python
+distance_score = exp(-cut_distance / 10)
+```
+
+Interpretation:
+
+| Distance | Approximate score  |
+| -------- | ------------------ |
+| 0 bp     | 1.0                |
+| 10 bp    | 0.37               |
+| 30 bp    | strongly penalised |
+
+---
+
+## 7.3 Off-Target Component
+
+Low-mismatch off-targets dominate the specificity penalty.
+
+Same-chromosome hits receive additional weighting because they are more difficult to segregate genetically.
+
+### Penalty model
+
+```python
+penalty = (
+    w1 * n_mm1 +
+    w2 * n_mm2 +
+    w3 * n_mm3 +
+    w_chr * n_mm1_same_chr
+)
+```
+
+### Final score
+
+```python
+offtarget_score = 1 / (1 + penalty)
+```
+
+---
+
+## 7.4 RS3 Component
+
+RS3 outputs log-odds rather than probabilities.
+
+TFTag converts them using a logistic transform:
+
+```python
+rs3_score_norm = 1 / (1 + exp(-rs3_score))
+```
+
+---
+
+## 7.5 Edit Complexity Component
+
+Guides requiring donor edits are penalised.
+
+Additional penalties are applied for:
+
+* multiple edits,
+* distal edits,
+* splice-risk overlap.
+
+---
+
+## 7.6 Composite Score
+
+```python
+selection_score = (
+    w_dist   * distance_score +
+    w_off    * offtarget_score +
+    w_rs3    * rs3_score_norm +
+    w_edit   * edit_score +
+    w_splice * splice_score
+)
+```
+
+Scoring weights are written into:
+
+* run logs,
+* JSON provenance files.
+
+---
+
+## 7.7 Selection Tiers
+
+| Tier | Meaning                          |
+| ---- | -------------------------------- |
+| 0    | Preferred guides                 |
+| 1    | Multiple perfect genomic matches |
+| 2    | Rejected guides                  |
+
+Guides are ranked:
+
+1. by tier,
+2. by composite score.
+
+---
+
+# 8. Output Structure
+
+## Main Outputs
+
+| File       | Description                 |
+| ---------- | --------------------------- |
+| `.sqlite`  | Indexed relational database |
+| `.parquet` | Efficient analytical format |
+| `.csv`     | Human-readable table        |
+| `.log`     | Human-readable run log      |
+| `.json`    | Structured provenance log   |
+
+---
+
+## Important Output Columns
+
+| Category      | Columns                                            |
+| ------------- | -------------------------------------------------- |
+| Gene          | `gene_id`, `gene_symbol`, `tag`                    |
+| Transcript    | `terminus_transcripts`, `terminus_isoforms`        |
+| Readthrough   | `potential_readthrough`, `stop_translation_status` |
+| Guide         | `grna_seq_23`, `cut_distance`                      |
+| Specificity   | `n_mm*`, `n_mm*_same_chr`                          |
+| Editing       | `requires_edit_arm`, `edit_priority`               |
+| Splice safety | `splice_risk`, `splice_risk_details`               |
+| Ranking       | `selection_score`, `selection_tier`                |
+| QC            | `warnings`, `reject_reason`                        |
+
+---
+
+# 9. Query Examples
+
+## Best guides
 
 ```sql
 SELECT *
@@ -314,7 +888,7 @@ ORDER BY gene_id, tag, selection_score DESC;
 
 ---
 
-### All guides for gene
+## All guides for a gene
 
 ```sql
 SELECT *
@@ -323,255 +897,107 @@ WHERE gene_symbol = 'pax2'
 ORDER BY selection_tier ASC, selection_score DESC;
 ```
 
-### All guides for gene, filtered and sorted
-
-```sql
-SELECT
-  name, tag, feature,
-  spacer, cut_distance,
-  rs3_score, n_hits, cclmoff_max
-FROM guides
-WHERE name = 'pax2'
-ORDER BY cut_distance ASC, rs3_score DESC;
-Example: best N-terminal guide per gene
-SELECT *
-FROM guides
-WHERE feature = 'start_codon'
-  AND designable = 1
-  AND rejected = 0
-ORDER BY name, cut_distance, rs3_score DESC;
-```
-
 ---
 
-## 8. Guide Scoring
-
-TFTag assigns each guide a **composite selection score** (`selection_score`) and a **selection tier** (`selection_tier`) to prioritise guides per terminus.
-
-The system reflects practical experimental constraints:
-- proximity to the tagging site  
-- off-target risk (especially on the same chromosome)  
-- predicted efficiency  
-- need for sequence editing  
-
----
-
-### 8.1 Overview of scoring workflow
-
-For each guide:
-
-1. Compute component scores:
-   - distance score  
-   - off-target score  
-   - efficiency score (RS3)  
-   - edit score  
-
-2. Combine into a weighted composite score
-
-3. Assign a **selection tier** (hard constraints)
-
-4. Rank guides:
-   - first by `selection_tier`
-   - then by `selection_score`
-
----
-
-### 8.2 Distance component
-
-Guides closer to the codon are preferred.
-
-```python
-distance_score = exp(-cut_distance / d0)
-```
-
-- `cut_distance`: distance (bp) from Cas9 cut site to codon  
-- `d0`: decay constant (default ≈ 10 bp)
-
-Interpretation:
-- 0 bp → 1.0  
-- 10 bp → ~0.37  
-- >30 bp → strongly penalised  
-
----
-
-### 8.3 Off-target component
-
-Off-targets are penalised with:
-- strong weighting for low-mismatch hits  
-- additional penalty for same-chromosome hits  
-
-#### Weighted penalty
-
-```python
-penalty = (
-    w1 * n_mm1 +
-    w2 * n_mm2 +
-    w3 * n_mm3 +
-    w1_chr * n_mm1_same_chr
-)
-```
-
-Typical behaviour:
-- 1-mismatch hits dominate the penalty  
-- same-chromosome hits are especially undesirable  
-
-#### Final score
-
-```python
-offtarget_score = 1 / (1 + penalty)
-```
-
-Interpretation:
-- 1.0 → no off-targets  
-- ~0.5 → moderate risk  
-- → 0 → severe off-target burden  
-
----
-
-### 8.4 RS3 efficiency component
-
-RS3 values are **log-odds**, not probabilities.
-
-They are transformed as:
-
-```python
-rs3_score_norm = 1 / (1 + exp(-rs3_score))
-```
-
-Interpretation:
-- ~0.5 → average efficiency  
-- → 1 → high efficiency  
-- → 0 → low efficiency  
-
----
-
-### 8.5 Edit component
-
-Guides requiring sequence edits are penalised.
-
-| Case | Description | Score |
-|------|-------------|------|
-| no edit | no mutation required | 1.0 |
-| coding edit | synonymous edit in CDS | 0.7 |
-| non-coding edit | edit outside coding region | 0.1 |
-
----
-
-### 8.6 Composite score
-
-The final score is a weighted combination:
-
-```python
-selection_score = (
-    w_dist * distance_score +
-    w_off  * offtarget_score +
-    w_rs3  * rs3_score_norm +
-    w_edit * edit_score
-)
-```
-
-Weights are configurable but typically:
-- distance: high importance  
-- off-targets: high importance  
-- RS3: moderate  
-- edits: moderate  
-
----
-
-### 8.7 Selection tiers (hard constraints)
-
-Guides are first classified into tiers:
-
-| Tier | Condition | Meaning |
-|------|----------|--------|
-| 0 | n_mm0 == 1 AND not rejected | preferred |
-| 1 | n_mm0 > 1 | multiple perfect matches |
-| 2 | rejected = TRUE | requires non-coding edits |
-
-Ranking is:
-1. by `selection_tier`  
-2. then by `selection_score`  
-
----
-
-### 8.8 Warnings
-
-Warnings are recorded in:
-
-```
-selection_warning
-```
-
-Triggered by:
-- `n_mm0 > 1`
-- non-coding edit required  
-
----
-
-### 8.9 Practical interpretation
-
-Best guides typically:
-- cut within ~10 bp of the codon  
-- have no 1-mismatch off-targets  
-- have no same-chromosome off-targets  
-- do not require edits  
-- have high RS3 scores  
-
----
-
-### 8.10 Recommended usage
-
-Example query:
+## Guides requiring splice-risk review
 
 ```sql
 SELECT *
 FROM guides
-WHERE selection_tier = 0
-ORDER BY selection_score DESC;
+WHERE splice_risk != 'none';
 ```
 
 ---
 
-### 8.11 Notes
+## Guides rejected during filtering
 
-- Off-target penalties are asymmetric (low mismatches dominate)  
-- Same-chromosome hits are penalised more heavily as more difficult to detect in the fly  
-- RS3 is treated probabilistically after transformation  
-- Tiering ensures biologically undesirable guides are never selected first  
-
-## 9. Troubleshooting
-
-### No guides found
-- No NGG sites in scan window  
-- Chromosome name mismatch between GTF and FASTA  
-- Missing start/stop codon annotations  
-
-### Many guides marked `designable = FALSE`
-- Genes near contig ends  
-- Primer window constraints too strict  
-
-### RS3 scores missing
-- RS3 package not installed  
-- 30-mer context truncated near contig end  
-
-### Cas-OFFinder errors
-- Incorrect binary path  
-- Invalid device specification  
-
-Check the `warnings` column for details.
+```sql
+SELECT gene_symbol, tag, spacer, reject_reason
+FROM guides
+WHERE rejected = 1;
+```
 
 ---
 
-## 10. Best practices
+# 10. Performance Considerations
 
-Record:
+The most computationally expensive stages are:
 
-* genome build
-* annotation version
-* mismatch threshold
-* RS3 model
-* scoring parameters
+1. Cas-OFFinder enumeration,
+2. RS3 scoring,
+3. Primer3 execution.
 
-## 11. Citation
+TFTag minimises unnecessary work by:
 
-If you use TFTag, please cite the associated publication (when available) and/or the GitHub repository.
+* filtering early,
+* only scoring retained guides,
+* only designing primers after final selection.
+
+---
+
+# 11. Troubleshooting
+
+## No guides found
+
+Potential causes:
+
+* no NGG PAMs near the terminus,
+* chromosome naming mismatch,
+* aggressive cut-distance filtering,
+* stock-specific PAM mutations.
+
+---
+
+## Many guides rejected
+
+Potential causes:
+
+* excessive off-target burden,
+* non-coding edit requirement,
+* splice-risk overlap,
+* donor design constraints.
+
+---
+
+## Missing RS3 scores
+
+Potential causes:
+
+* truncated 30-mer context,
+* RS3 package unavailable,
+* chromosome-edge effects.
+
+---
+
+## Cas-OFFinder failures
+
+Check:
+
+* binary path,
+* CUDA/device specification,
+* input FASTA indexing.
+
+---
+
+# 12. Reproducibility Recommendations
+
+Always record:
+
+* genome build,
+* annotation version,
+* mismatch threshold,
+* scoring weights,
+* RS3 model,
+* stock VCF versions,
+* TFTag version.
+
+---
+
+# 13. Citation
+
+If you use TFTag, please cite:
+
+* the associated publication (when available),
+* the TFTag repository,
+* Cas-OFFinder,
+* Rule Set 3.
