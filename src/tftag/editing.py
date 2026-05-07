@@ -285,6 +285,22 @@ def _guide_spacer_position_to_genomic(
 
     raise ValueError("grna_strand must be '+' or '-'")
 
+def _fmt_mut_positions(
+    arm_start: int,
+    arm_end: int,
+    gene_strand: str,
+    muts: List[Dict],
+) -> str:
+    """Return semicolon-separated genomic mutation positions."""
+    if not muts:
+        return "none"
+
+    positions = [
+        str(_coding_index_to_genomic(mut["idx"], arm_start, arm_end, gene_strand))
+        for mut in muts
+    ]
+    return ";".join(positions)
+
 
 def choose_arm_for_mutation(
     gRNA_df: pd.DataFrame,
@@ -523,6 +539,8 @@ def apply_silent_edits(
         ("blocking_mutation_zone", "none"),
         ("primary_blocking_position", np.nan),
         ("blocking_priority_score", 0.0),
+        ("HAL_mutation_positions", "none"),
+        ("HAR_mutation_positions", "none"),
     ]:
         if col not in df.columns:
             df[col] = default
@@ -779,6 +797,20 @@ def apply_silent_edits(
         work.at[idx, "blocking_mutation_count"] = n_muts
         work.at[idx, "blocking_mutation_strategy"] = mutation_strategy
         work.at[idx, "blocking_mutation_zone"] = mutation_zone
+
+        work.at[idx, "HAL_mutation_positions"] = _fmt_mut_positions(
+            int(rowd["HALs"]),
+            int(rowd["HALe"]),
+            gene_strand,
+            hal_muts,
+        )
+
+        work.at[idx, "HAR_mutation_positions"] = _fmt_mut_positions(
+            int(rowd["HARs"]),
+            int(rowd["HARe"]),
+            gene_strand,
+            har_muts,
+        )
 
         if not did_edit:
             work.at[idx, "warnings"] = merge_warn(

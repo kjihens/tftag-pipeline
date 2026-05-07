@@ -400,12 +400,6 @@ def run_pipeline(
         candidates = initialise_guide_status(candidates)
         candidates = scan.add_grna_23_coordinates(candidates)
 
-        candidates = splicecheck.annotate_splice_overlap(
-            candidates,
-            db,
-            show_progress=True,
-        )
-
         # ------------------------------------------------------------
         # Optional stock-specific guide compatibility annotation
         # ------------------------------------------------------------
@@ -628,6 +622,13 @@ def run_pipeline(
                 work,
                 show_progress=True,
             )
+
+            work = splicecheck.annotate_edit_splice_risk(
+                work,
+                db,
+                show_progress=True,
+            )
+
             candidates = _merge_work_back(candidates, work)
 
         # ------------------------------------------------------------

@@ -1,22 +1,24 @@
 """
-Splice-site and intron-overlap annotation for TFTag guides.
+Splice-site and edit-risk annotation for TFTag.
 
 Purpose
 -------
-Annotate whether a candidate gRNA overlaps intronic sequence or splice-sensitive
-regions near exon/intron boundaries.
+This module annotates whether actual donor blocking edits overlap intronic
+sequence or splice-sensitive regions.
 
-This is useful because a guide can be close to a start/stop codon while part of
-its protospacer or PAM overlaps:
+Important design principle
+--------------------------
+We do NOT penalise a guide merely because the gRNA 23-mer overlaps an intron
+from another splice variant. The relevant question is:
 
-- intron
-- exon/intron junction
-- splice donor core
-- splice acceptor core
-- broader splice donor/acceptor region
+    Does the actual donor edit mutate intronic sequence or a splice site
+    in the transcript(s) covered by this terminus?
 
-This module does not reject guides. It annotates them for scoring, warnings, and
-manual review.
+Therefore the main public function is:
+
+    annotate_edit_splice_risk()
+
+It should be called after apply_silent_edits().
 """
 
 from __future__ import annotations
@@ -42,101 +44,53 @@ def _feature_transcript_ids(feat) -> set[str]:
     return ids
 
 
-def _interval_overlap_len(a_start: int, a_end: int, b_start: int, b_end: int) -> int:
-    """Return overlap length between two 1-based inclusive intervals."""
-    start = max(int(a_start), int(b_start))
-    end = min(int(a_end), int(b_end))
-    return max(0, end - start + 1)
-
-
-def _interval_overlaps(a_start: int, a_end: int, b_start: int, b_end: int) -> bool:
-    """Return True if two 1-based inclusive intervals overlap."""
-    return _interval_overlap_len(a_start, a_end, b_start, b_end) > 0
-
-
 def _merge_intervals(intervals: Iterable[tuple[int, int]]) -> list[tuple[int, int]]:
-    """Merge overlapping or directly adjacent 1-based inclusive intervals."""
-    sorted_intervals = sorted((int(s), int(e)) for s, e in intervals if int(e) >= int(s))
+    """Merge overlapping or adjacent 1-based inclusive intervals."""
+    sorted_intervals = sorted(
+        (int(start), int(end))
+        for start, end in intervals
+        if int(end) >= int(start)
+    )
 
     if not sorted_intervals:
         return []
 
     merged: list[tuple[int, int]] = []
-    cur_s, cur_e = sorted_intervals[0]
+    cur_start, cur_end = sorted_intervals[0]
 
-    for s, e in sorted_intervals[1:]:
-        if s <= cur_e + 1:
-            cur_e = max(cur_e, e)
+    for start, end in sorted_intervals[1:]:
+        if start <= cur_end + 1:
+            cur_end = max(cur_end, end)
         else:
-            merged.append((cur_s, cur_e))
-            cur_s, cur_e = s, e
+            merged.append((cur_start, cur_end))
+            cur_start, cur_end = start, end
 
-    merged.append((cur_s, cur_e))
+    merged.append((cur_start, cur_end))
     return merged
-
-
-def _clip_interval(start: int, end: int, chrom_len: int | None = None) -> tuple[int, int] | None:
-    """
-    Clip an interval to positive genomic coordinates.
-
-    If chrom_len is supplied, also clips to chromosome length.
-    """
-    s = max(1, int(start))
-    e = int(end)
-
-    if chrom_len is not None:
-        e = min(e, int(chrom_len))
-
-    if e < s:
-        return None
-
-    return s, e
-
-
-def _exons_by_transcript_for_gene(gene_id: str, db) -> dict[str, list[tuple[int, int]]]:
-    """
-    Return exon intervals grouped by transcript ID for one gene.
-
-    Uses transcript_id / Parent attributes rather than relying entirely on
-    gffutils parent-child traversal, which is more robust for GTF files.
-    """
-    try:
-        gene = db[gene_id]
-    except Exception:
-        return {}
-
-    tx_to_exons: dict[str, list[tuple[int, int]]] = defaultdict(list)
-
-    for feat in db.children(gene, featuretype="exon", order_by="start"):
-        tx_ids = _feature_transcript_ids(feat)
-
-        for tx_id in tx_ids:
-            tx_to_exons[tx_id].append((int(feat.start), int(feat.end)))
-
-    return {
-        tx_id: _merge_intervals(intervals)
-        for tx_id, intervals in tx_to_exons.items()
-        if intervals
-    }
 
 
 def _infer_introns_from_exons(
     exons: list[tuple[int, int]],
 ) -> list[tuple[int, int]]:
     """
-    Infer introns from sorted exon intervals.
+    Infer intron intervals from transcript exon intervals.
 
-    For exon1=(100,200), exon2=(300,400), intron=(201,299).
+    Example
+    -------
+    exon1 = 100..200
+    exon2 = 300..400
+
+    inferred intron = 201..299
     """
     exons = _merge_intervals(exons)
     introns: list[tuple[int, int]] = []
 
-    for (_, prev_end), (next_start, _) in zip(exons, exons[1:]):
-        intron_s = prev_end + 1
-        intron_e = next_start - 1
+    for (_, previous_exon_end), (next_exon_start, _) in zip(exons, exons[1:]):
+        intron_start = previous_exon_end + 1
+        intron_end = next_exon_start - 1
 
-        if intron_e >= intron_s:
-            introns.append((intron_s, intron_e))
+        if intron_end >= intron_start:
+            introns.append((intron_start, intron_end))
 
     return introns
 
@@ -151,62 +105,87 @@ def _splice_windows_for_transcript(
     acceptor_region_intronic: int = 20,
 ) -> dict[str, list[tuple[int, int]]]:
     """
-    Build splice-site windows for a transcript.
+    Build intron and splice-window intervals for one transcript.
 
     Definitions
     -----------
-    donor core:
+    splice_donor_core:
         Exon boundary plus first 2 intronic bases.
 
-    acceptor core:
+    splice_acceptor_core:
         Last 2 intronic bases plus exon boundary.
 
-    donor region:
+    splice_donor_region:
         Broader donor-sensitive region, including first 6 intronic bases.
 
-    acceptor region:
+    splice_acceptor_region:
         Broader acceptor-sensitive region, including last 20 intronic bases.
 
-    Coordinate notes
-    ----------------
-    Genomic coordinates are always returned on the '+' coordinate axis.
-    Gene/transcript strand determines which side of an intron is donor vs acceptor.
+    Notes
+    -----
+    Coordinates are always returned on the genomic '+' coordinate axis.
+    The transcript strand determines which side of each intron is donor vs
+    acceptor.
     """
     exons = _merge_intervals(exons)
     introns = _infer_introns_from_exons(exons)
 
-    windows = {
+    windows: dict[str, list[tuple[int, int]]] = {
+        "intron": introns,
         "splice_donor_core": [],
         "splice_acceptor_core": [],
         "splice_donor_region": [],
         "splice_acceptor_region": [],
         "exon_intron_junction": [],
-        "intron": introns,
     }
 
-    for intron_s, intron_e in introns:
+    for intron_start, intron_end in introns:
         if strand == "+":
-            donor_boundary = intron_s - 1
-            acceptor_boundary = intron_e + 1
+            donor_boundary = intron_start - 1
+            acceptor_boundary = intron_end + 1
 
-            donor_core = (donor_boundary, intron_s + donor_core_intronic - 1)
-            acceptor_core = (intron_e - acceptor_core_intronic + 1, acceptor_boundary)
+            donor_core = (
+                donor_boundary,
+                intron_start + donor_core_intronic - 1,
+            )
+            acceptor_core = (
+                intron_end - acceptor_core_intronic + 1,
+                acceptor_boundary,
+            )
 
-            donor_region = (donor_boundary, intron_s + donor_region_intronic - 1)
-            acceptor_region = (intron_e - acceptor_region_intronic + 1, acceptor_boundary)
+            donor_region = (
+                donor_boundary,
+                intron_start + donor_region_intronic - 1,
+            )
+            acceptor_region = (
+                intron_end - acceptor_region_intronic + 1,
+                acceptor_boundary,
+            )
 
         elif strand == "-":
-            # On the minus strand, transcription runs from high to low coordinates.
-            # Therefore donor is at the high-coordinate end of the intron and
-            # acceptor is at the low-coordinate end.
-            donor_boundary = intron_e + 1
-            acceptor_boundary = intron_s - 1
+            # On the minus strand, transcription runs high -> low.
+            # The donor is therefore at the high-coordinate end of the intron,
+            # and the acceptor is at the low-coordinate end.
+            donor_boundary = intron_end + 1
+            acceptor_boundary = intron_start - 1
 
-            donor_core = (intron_e - donor_core_intronic + 1, donor_boundary)
-            acceptor_core = (acceptor_boundary, intron_s + acceptor_core_intronic - 1)
+            donor_core = (
+                intron_end - donor_core_intronic + 1,
+                donor_boundary,
+            )
+            acceptor_core = (
+                acceptor_boundary,
+                intron_start + acceptor_core_intronic - 1,
+            )
 
-            donor_region = (intron_e - donor_region_intronic + 1, donor_boundary)
-            acceptor_region = (acceptor_boundary, intron_s + acceptor_region_intronic - 1)
+            donor_region = (
+                intron_end - donor_region_intronic + 1,
+                donor_boundary,
+            )
+            acceptor_region = (
+                acceptor_boundary,
+                intron_start + acceptor_region_intronic - 1,
+            )
 
         else:
             raise ValueError("strand must be '+' or '-'")
@@ -216,34 +195,171 @@ def _splice_windows_for_transcript(
         windows["splice_donor_region"].append(donor_region)
         windows["splice_acceptor_region"].append(acceptor_region)
 
-        # Compact generic exon/intron-junction windows. These are deliberately
-        # small and strand-independent.
-        windows["exon_intron_junction"].append((intron_s - 1, intron_s + 1))
-        windows["exon_intron_junction"].append((intron_e - 1, intron_e + 1))
+        # Generic small junction windows. These are mainly diagnostic.
+        windows["exon_intron_junction"].append((intron_start - 1, intron_start + 1))
+        windows["exon_intron_junction"].append((intron_end - 1, intron_end + 1))
 
     return {
-        key: _merge_intervals(value)
-        for key, value in windows.items()
+        key: _merge_intervals(intervals)
+        for key, intervals in windows.items()
     }
 
 
-def _build_gene_splice_model(
+def _parse_semicolon_positions(value) -> list[int]:
+    """
+    Parse semicolon-separated genomic positions.
+
+    Accepts:
+      - "none"
+      - ""
+      - NaN
+      - "12345"
+      - "12345;12350"
+    """
+    if value is None or pd.isna(value):
+        return []
+
+    text = str(value).strip()
+    if not text or text == "none":
+        return []
+
+    positions: list[int] = []
+
+    for item in text.split(";"):
+        item = item.strip()
+        if not item or item == "none":
+            continue
+
+        try:
+            positions.append(int(item))
+        except ValueError:
+            continue
+
+    return positions
+
+
+def _parse_terminus_transcripts(value) -> list[str]:
+    """Parse semicolon-separated transcript labels from terminus_transcripts."""
+    if value is None or pd.isna(value):
+        return []
+
+    text = str(value).strip()
+    if not text or text == "none":
+        return []
+
+    return [item.strip() for item in text.split(";") if item.strip()]
+
+
+def _transcript_label_to_id_map(gene_id: str, db) -> dict[str, str]:
+    """
+    Map transcript labels back to transcript IDs for one gene.
+
+    FlyBase GTF example
+    -------------------
+    transcript_id     = FBtr0078054
+    transcript_symbol = Polr1B-RA
+
+    terminus_transcripts usually stores transcript_symbol values, so this map
+    allows us to recover the corresponding transcript_id.
+    """
+    try:
+        gene = db[gene_id]
+    except Exception:
+        return {}
+
+    mapping: dict[str, str] = {}
+
+    transcript_types = [
+        "transcript",
+        "mRNA",
+        "ncRNA",
+        "lnc_RNA",
+        "tRNA",
+        "rRNA",
+        "snRNA",
+        "snoRNA",
+    ]
+
+    for tx in db.children(gene, featuretype=transcript_types, order_by="start"):
+        tx_id_values = tx.attributes.get("transcript_id", [])
+        tx_symbol_values = tx.attributes.get("transcript_symbol", [])
+        tx_name_values = tx.attributes.get("transcript_name", [])
+
+        possible_ids = {str(tx.id)}
+        for value in tx_id_values:
+            if value:
+                possible_ids.add(str(value))
+
+        labels = set(possible_ids)
+
+        for value in tx_symbol_values:
+            if value:
+                labels.add(str(value))
+
+        for value in tx_name_values:
+            if value:
+                labels.add(str(value))
+
+        canonical_id = str(tx_id_values[0]) if tx_id_values else str(tx.id)
+
+        for label in labels:
+            mapping[label] = canonical_id
+
+    return mapping
+
+
+def _exons_for_transcript(
     gene_id: str,
+    transcript_id: str,
+    db,
+) -> list[tuple[int, int]]:
+    """
+    Return exon intervals for a specific transcript ID.
+
+    This uses feature attributes rather than only relying on gffutils hierarchy.
+    That is more robust for GTF files where transcript membership is encoded via
+    transcript_id attributes.
+    """
+    try:
+        gene = db[gene_id]
+    except Exception:
+        return []
+
+    exons: list[tuple[int, int]] = []
+
+    for feat in db.children(gene, featuretype="exon", order_by="start"):
+        tx_ids = _feature_transcript_ids(feat)
+
+        if transcript_id in tx_ids:
+            exons.append((int(feat.start), int(feat.end)))
+
+    return _merge_intervals(exons)
+
+
+def _build_relevant_transcript_splice_model(
+    gene_id: str,
+    gene_strand: str,
+    transcript_labels: list[str],
     db,
     *,
-    strand: str,
     donor_core_intronic: int,
     acceptor_core_intronic: int,
     donor_region_intronic: int,
     acceptor_region_intronic: int,
 ) -> dict[str, list[tuple[int, int]]]:
     """
-    Build a unioned splice/intron model for all transcripts of one gene.
+    Build intron/splice windows for transcripts relevant to this terminus.
 
-    The unioned model is conservative: if any transcript has an intron/splice
-    boundary overlapping the guide, the guide is annotated.
+    This avoids false positives caused by other isoforms of the same gene.
+    For example, an exon in transcript RA may be intronic in transcript RB.
+    If the terminus only tags RA, RB-specific introns should not be used to
+    penalise the design.
     """
-    tx_to_exons = _exons_by_transcript_for_gene(gene_id, db)
+    label_to_id = _transcript_label_to_id_map(gene_id, db)
+
+    transcript_ids: list[str] = []
+    for label in transcript_labels:
+        transcript_ids.append(label_to_id.get(label, label))
 
     union: dict[str, list[tuple[int, int]]] = {
         "intron": [],
@@ -254,10 +370,14 @@ def _build_gene_splice_model(
         "exon_intron_junction": [],
     }
 
-    for exons in tx_to_exons.values():
+    for transcript_id in transcript_ids:
+        exons = _exons_for_transcript(gene_id, transcript_id, db)
+        if not exons:
+            continue
+
         tx_windows = _splice_windows_for_transcript(
             exons=exons,
-            strand=strand,
+            strand=gene_strand,
             donor_core_intronic=donor_core_intronic,
             acceptor_core_intronic=acceptor_core_intronic,
             donor_region_intronic=donor_region_intronic,
@@ -273,21 +393,15 @@ def _build_gene_splice_model(
     }
 
 
-def _overlap_any(
-    query_start: int,
-    query_end: int,
+def _point_overlaps_any(
+    pos: int,
     intervals: list[tuple[int, int]],
-) -> tuple[bool, int]:
-    """Return whether query overlaps any interval and the total overlap length."""
-    total = 0
-
-    for s, e in intervals:
-        total += _interval_overlap_len(query_start, query_end, s, e)
-
-    return total > 0, total
+) -> bool:
+    """Return True if genomic position lies inside any interval."""
+    return any(start <= int(pos) <= end for start, end in intervals)
 
 
-def annotate_splice_overlap(
+def annotate_edit_splice_risk(
     guides_df: pd.DataFrame,
     db,
     *,
@@ -298,28 +412,45 @@ def annotate_splice_overlap(
     show_progress: bool = True,
 ) -> pd.DataFrame:
     """
-    Annotate gRNA rows for intron and splice-region overlap.
+    Annotate whether actual donor edit positions overlap introns/splice sites.
+
+    This function is edit-position based. It does not look at the entire gRNA.
+    It only evaluates bases that were actually mutated in the donor arm.
 
     Required columns
     ----------------
     - gene_id
     - gene_strand
-    - chromosome
-    - grna_23_start
-    - grna_23_end
+    - terminus_transcripts
+    - HAL_mutation_positions
+    - HAR_mutation_positions
 
     Added columns
     -------------
-    - grna_overlaps_intron
-    - grna_intronic_bases
-    - grna_overlaps_exon_intron_junction
-    - grna_overlaps_splice_donor_core
-    - grna_overlaps_splice_acceptor_core
-    - grna_overlaps_splice_donor_region
-    - grna_overlaps_splice_acceptor_region
-    - grna_overlaps_splice_core
-    - grna_overlaps_splice_region
-    - splice_warning
+    - edit_overlaps_intron
+    - edit_overlaps_splice_donor_core
+    - edit_overlaps_splice_acceptor_core
+    - edit_overlaps_splice_core
+    - edit_overlaps_splice_donor_region
+    - edit_overlaps_splice_acceptor_region
+    - edit_overlaps_splice_region
+    - edit_splice_risk
+    - edit_splice_warning
+
+    Risk interpretation
+    -------------------
+    splice_core_edit:
+        An edit hits the donor/acceptor core. This is the strongest warning and
+        may be worth rejecting.
+
+    splice_region_edit:
+        An edit hits a broader donor/acceptor region but not the core.
+
+    intronic_edit:
+        An edit lies inside an intron of a relevant transcript.
+
+    none:
+        No edit-splice risk detected.
     """
     df = guides_df.copy()
 
@@ -329,97 +460,128 @@ def annotate_splice_overlap(
     required = [
         "gene_id",
         "gene_strand",
-        "chromosome",
-        "grna_23_start",
-        "grna_23_end",
+        "terminus_transcripts",
+        "HAL_mutation_positions",
+        "HAR_mutation_positions",
     ]
-    missing = [col for col in required if col not in df.columns]
+    missing = [column for column in required if column not in df.columns]
     if missing:
-        raise ValueError(f"annotate_splice_overlap missing required columns: {missing}")
+        raise ValueError(f"annotate_edit_splice_risk missing required columns: {missing}")
 
-    for col, default in [
-        ("grna_overlaps_intron", False),
-        ("grna_intronic_bases", 0),
-        ("grna_overlaps_exon_intron_junction", False),
-        ("grna_overlaps_splice_donor_core", False),
-        ("grna_overlaps_splice_acceptor_core", False),
-        ("grna_overlaps_splice_donor_region", False),
-        ("grna_overlaps_splice_acceptor_region", False),
-        ("grna_overlaps_splice_core", False),
-        ("grna_overlaps_splice_region", False),
-        ("splice_warning", "none"),
+    for column, default in [
+        ("edit_overlaps_intron", False),
+        ("edit_overlaps_splice_donor_core", False),
+        ("edit_overlaps_splice_acceptor_core", False),
+        ("edit_overlaps_splice_core", False),
+        ("edit_overlaps_splice_donor_region", False),
+        ("edit_overlaps_splice_acceptor_region", False),
+        ("edit_overlaps_splice_region", False),
+        ("edit_splice_risk", "none"),
+        ("edit_splice_warning", "none"),
     ]:
-        if col not in df.columns:
-            df[col] = default
+        if column not in df.columns:
+            df[column] = default
 
     if "warnings" not in df.columns:
         df["warnings"] = "none"
 
-    model_cache: dict[tuple[str, str], dict[str, list[tuple[int, int]]]] = {}
+    model_cache: dict[
+        tuple[str, str, tuple[str, ...]],
+        dict[str, list[tuple[int, int]]],
+    ] = {}
 
     iterator = df.itertuples(index=True)
     if show_progress:
-        iterator = tqdm(iterator, total=len(df), desc="Annotating splice overlap", leave=False)
+        iterator = tqdm(
+            iterator,
+            total=len(df),
+            desc="Annotating edit splice risk",
+            leave=False,
+        )
 
     for row in iterator:
         idx = row.Index
 
-        gene_id = str(row.gene_id)
-        strand = str(row.gene_strand)
-        key = (gene_id, strand)
+        mutation_positions = (
+            _parse_semicolon_positions(getattr(row, "HAL_mutation_positions"))
+            + _parse_semicolon_positions(getattr(row, "HAR_mutation_positions"))
+        )
 
-        if key not in model_cache:
-            model_cache[key] = _build_gene_splice_model(
+        if not mutation_positions:
+            continue
+
+        gene_id = str(row.gene_id)
+        gene_strand = str(row.gene_strand)
+        transcript_labels = _parse_terminus_transcripts(row.terminus_transcripts)
+
+        if not transcript_labels:
+            warning = "cannot assess edit splice risk: no terminus_transcripts annotation"
+            df.at[idx, "edit_splice_warning"] = warning
+            df.at[idx, "warnings"] = merge_warn(df.at[idx, "warnings"], warning)
+            continue
+
+        cache_key = (gene_id, gene_strand, tuple(sorted(transcript_labels)))
+
+        if cache_key not in model_cache:
+            model_cache[cache_key] = _build_relevant_transcript_splice_model(
                 gene_id,
+                gene_strand,
+                transcript_labels,
                 db,
-                strand=strand,
                 donor_core_intronic=donor_core_intronic,
                 acceptor_core_intronic=acceptor_core_intronic,
                 donor_region_intronic=donor_region_intronic,
                 acceptor_region_intronic=acceptor_region_intronic,
             )
 
-        model = model_cache[key]
+        model = model_cache[cache_key]
 
-        q_start = int(min(row.grna_23_start, row.grna_23_end))
-        q_end = int(max(row.grna_23_start, row.grna_23_end))
+        intron_hit = any(
+            _point_overlaps_any(position, model["intron"])
+            for position in mutation_positions
+        )
+        donor_core_hit = any(
+            _point_overlaps_any(position, model["splice_donor_core"])
+            for position in mutation_positions
+        )
+        acceptor_core_hit = any(
+            _point_overlaps_any(position, model["splice_acceptor_core"])
+            for position in mutation_positions
+        )
+        donor_region_hit = any(
+            _point_overlaps_any(position, model["splice_donor_region"])
+            for position in mutation_positions
+        )
+        acceptor_region_hit = any(
+            _point_overlaps_any(position, model["splice_acceptor_region"])
+            for position in mutation_positions
+        )
 
-        overlaps_intron, intronic_bases = _overlap_any(q_start, q_end, model["intron"])
-        overlaps_junction, _ = _overlap_any(q_start, q_end, model["exon_intron_junction"])
-        overlaps_donor_core, _ = _overlap_any(q_start, q_end, model["splice_donor_core"])
-        overlaps_acceptor_core, _ = _overlap_any(q_start, q_end, model["splice_acceptor_core"])
-        overlaps_donor_region, _ = _overlap_any(q_start, q_end, model["splice_donor_region"])
-        overlaps_acceptor_region, _ = _overlap_any(q_start, q_end, model["splice_acceptor_region"])
+        core_hit = donor_core_hit or acceptor_core_hit
+        region_hit = donor_region_hit or acceptor_region_hit
 
-        overlaps_core = overlaps_donor_core or overlaps_acceptor_core
-        overlaps_region = overlaps_donor_region or overlaps_acceptor_region
+        df.at[idx, "edit_overlaps_intron"] = intron_hit
+        df.at[idx, "edit_overlaps_splice_donor_core"] = donor_core_hit
+        df.at[idx, "edit_overlaps_splice_acceptor_core"] = acceptor_core_hit
+        df.at[idx, "edit_overlaps_splice_core"] = core_hit
+        df.at[idx, "edit_overlaps_splice_donor_region"] = donor_region_hit
+        df.at[idx, "edit_overlaps_splice_acceptor_region"] = acceptor_region_hit
+        df.at[idx, "edit_overlaps_splice_region"] = region_hit
 
-        df.at[idx, "grna_overlaps_intron"] = overlaps_intron
-        df.at[idx, "grna_intronic_bases"] = int(intronic_bases)
-        df.at[idx, "grna_overlaps_exon_intron_junction"] = overlaps_junction
-        df.at[idx, "grna_overlaps_splice_donor_core"] = overlaps_donor_core
-        df.at[idx, "grna_overlaps_splice_acceptor_core"] = overlaps_acceptor_core
-        df.at[idx, "grna_overlaps_splice_donor_region"] = overlaps_donor_region
-        df.at[idx, "grna_overlaps_splice_acceptor_region"] = overlaps_acceptor_region
-        df.at[idx, "grna_overlaps_splice_core"] = overlaps_core
-        df.at[idx, "grna_overlaps_splice_region"] = overlaps_region
+        if core_hit:
+            risk = "splice_core_edit"
+        elif region_hit:
+            risk = "splice_region_edit"
+        elif intron_hit:
+            risk = "intronic_edit"
+        else:
+            risk = "none"
 
-        warning_items: list[str] = []
+        df.at[idx, "edit_splice_risk"] = risk
 
-        if overlaps_core:
-            warning_items.append("gRNA overlaps splice donor/acceptor core")
-        elif overlaps_region:
-            warning_items.append("gRNA overlaps broader splice donor/acceptor region")
-
-        if overlaps_intron:
-            warning_items.append(f"gRNA overlaps intronic sequence ({intronic_bases} bp)")
-
-        if overlaps_junction:
-            warning_items.append("gRNA overlaps exon-intron junction")
-
-        if warning_items:
-            splice_warning = "; ".join(warning_items)
-            df.at[idx, "splice_warning"] = splice_warning
-            df.at[idx, "warnings"] = merge_warn(df.at[idx, "warnings"], splice_warning)
+        if risk != "none":
+            warning = f"blocking edit overlaps {risk.replace('_', ' ')}"
+            df.at[idx, "edit_splice_warning"] = warning
+            df.at[idx, "warnings"] = merge_warn(df.at[idx, "warnings"], warning)
 
     return df
