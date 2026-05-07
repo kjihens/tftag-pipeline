@@ -390,7 +390,7 @@ def run_pipeline(
         if genes_list is None:
             genes_list = [gene.id for gene in db.features_of_type("gene")]
 
-        attribute = annotate.build_attribute_table(genes_list, db)
+        attribute = annotate.build_attribute_table(genes_list, db, fasta_dict=fasta_dict)
         input_summary = terminus_summary(attribute)
 
         logger.add_summary("Input summary", input_summary)

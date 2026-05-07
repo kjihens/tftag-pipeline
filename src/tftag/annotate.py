@@ -48,6 +48,8 @@ from typing import Iterable
 import pandas as pd
 from tqdm.auto import tqdm
 import gffutils
+from Bio.Seq import Seq
+from .utils import get_sequence
 
 
 # ---------------------------------------------------------------------
@@ -310,175 +312,407 @@ def add_terminus_isoform_columns(
 
 
 # ---------------------------------------------------------------------
-# Readthrough-like structural heuristic
+# Translation-based readthrough / stop-codon QC
 # ---------------------------------------------------------------------
 
-def _collect_transcript_cds_and_stops(tx, gene, db):
+from Bio.Seq import Seq
+from .utils import get_sequence
+
+
+def _transcript_label_to_id_map_for_gene(gene_id: str, db) -> dict[str, str]:
     """
-    Collect CDS span and stop-codon annotations for one transcript-like feature
-    by matching transcript IDs in feature attributes.
+    Map readable transcript labels back to transcript IDs.
 
-    Returns
-    -------
-    dict or None
-      None if the transcript has no CDS.
-      Otherwise a dictionary containing:
-      - tx_id
-      - chromosome
-      - strand
-      - cds_start
-      - cds_end
-      - stop_sites (set of exact stop-codon intervals)
-
-    Why this is needed
-    ------------------
-    We cannot rely on transcript->child traversal for all GTFs, so we collect
-    all gene-descendant CDS / stop_codon features whose transcript_id attributes
-    match the transcript.
-    """
-    tx_ids = _feature_transcript_ids(tx)
-    tx_ids.add(tx.id)  # fallback
-
-    cds_feats = []
-    stop_feats = []
-
-    for feat in db.children(gene, order_by="start"):
-        feat_tx_ids = _feature_transcript_ids(feat)
-        if not (tx_ids & feat_tx_ids):
-            continue
-
-        if feat.featuretype == "CDS":
-            cds_feats.append(feat)
-        elif feat.featuretype == "stop_codon":
-            stop_feats.append(feat)
-
-    if not cds_feats:
-        return None
-
-    cds_start = min(f.start for f in cds_feats)
-    cds_end = max(f.end for f in cds_feats)
-
-    return {
-        "tx_id": tx.id,
-        "chromosome": tx.seqid,
-        "strand": tx.strand,
-        "cds_start": cds_start,
-        "cds_end": cds_end,
-        "stop_sites": {(f.start, f.end) for f in stop_feats},
-    }
-
-
-def _is_potential_readthrough_for_stop(
-    gene_id: str,
-    chrom: str,
-    strand: str,
-    stop_start: int,
-    stop_end: int,
-    db,
-) -> bool:
-    """
-    Heuristic GTF-only test for whether a given stop codon could represent
-    a readthrough-like C-terminus.
-
-    We flag True if:
-      1) at least one transcript of the gene uses this exact stop_codon
-      2) another transcript has CDS extending beyond this stop in gene orientation
-      3) the extension is codon-compatible (multiple of 3 bp)
-
-    Important limitation
-    --------------------
-    This is NOT proof of translational stop-codon readthrough.
-    It is a structural annotation heuristic intended to flag potentially tricky
-    C-termini for donor / tagging design and downstream interpretation.
+    This allows us to use values stored in terminus_transcripts, e.g. dsx-RA,
+    and recover the transcript_id used on CDS/start/stop_codon features.
     """
     try:
         gene = db[gene_id]
     except gffutils.exceptions.FeatureNotFoundError:
-        return False
+        return {}
 
-    txs = _transcript_like_children(gene, db)
-    if not txs:
-        return False
+    mapping: dict[str, str] = {}
 
-    tx_info = []
-    for tx in txs:
-        info = _collect_transcript_cds_and_stops(tx, gene, db)
-        if info is None:
-            continue
-        if info["chromosome"] != chrom or info["strand"] != strand:
-            continue
-        tx_info.append(info)
+    for tx in _transcript_like_children(gene, db):
+        attrs = tx.attributes
 
-    if not tx_info:
-        return False
+        tx_ids = set()
+        tx_ids.add(str(tx.id))
 
-    # At least one transcript must explicitly terminate at this exact stop.
-    stopping_txs = [t for t in tx_info if (stop_start, stop_end) in t["stop_sites"]]
-    if not stopping_txs:
-        return False
+        for key in ("transcript_id", "Parent", "parent"):
+            for value in attrs.get(key, []):
+                if value:
+                    tx_ids.add(str(value))
 
-    # Look for another transcript with CDS continuation beyond this stop.
-    for t in tx_info:
-        if (stop_start, stop_end) in t["stop_sites"]:
-            continue
+        labels = set(tx_ids)
 
-        if strand == "+":
-            # On + strand, "beyond stop" means larger coordinates.
-            if t["cds_end"] <= stop_end:
-                continue
-            extension = t["cds_end"] - stop_end
+        for key in ("transcript_symbol", "transcript_name", "Name", "symbol"):
+            for value in attrs.get(key, []):
+                if value:
+                    labels.add(str(value))
+
+        canonical_id = None
+        tx_id_values = attrs.get("transcript_id", [])
+        if tx_id_values:
+            canonical_id = str(tx_id_values[0])
         else:
-            # On - strand, "beyond stop" in gene orientation means smaller coordinates.
-            if t["cds_start"] >= stop_start:
-                continue
-            extension = stop_start - t["cds_start"]
+            canonical_id = str(tx.id)
 
-        if extension > 0 and extension % 3 == 0:
-            return True
+        for label in labels:
+            mapping[label] = canonical_id
 
-    return False
+    return mapping
 
 
-def add_potential_readthrough_column(
-    attribute_df: pd.DataFrame,
+def _parse_semicolon_list(value) -> list[str]:
+    """Parse semicolon-separated annotation values."""
+    if value is None or pd.isna(value):
+        return []
+
+    text = str(value).strip()
+    if not text or text == "none":
+        return []
+
+    return [item.strip() for item in text.split(";") if item.strip()]
+
+
+def _features_for_transcript_under_gene(
+    gene,
     db,
     *,
+    featuretype: str,
+    transcript_id: str,
+) -> list:
+    """
+    Return features of a given type assigned to transcript_id.
+
+    Uses transcript_id / Parent attributes rather than assuming strict
+    gffutils parent-child structure.
+    """
+    out = []
+
+    for feat in db.children(gene, featuretype=featuretype, order_by="start"):
+        feat_tx_ids = _feature_transcript_ids(feat)
+
+        if transcript_id in feat_tx_ids:
+            out.append(feat)
+
+    return out
+
+
+def _stop_codon_matches_terminus(
+    stop_feat,
+    *,
+    chrom: str,
+    strand: str,
+    stop_start: int,
+    stop_end: int,
+) -> bool:
+    """Return True if a stop_codon feature is the exact terminus being assessed."""
+    return (
+        stop_feat.seqid == chrom
+        and stop_feat.strand == strand
+        and int(stop_feat.start) == int(stop_start)
+        and int(stop_feat.end) == int(stop_end)
+    )
+
+
+def _cds_sequence_for_transcript(
+    gene,
+    db,
+    fasta_dict,
+    *,
+    transcript_id: str,
+) -> str:
+    """
+    Reconstruct transcript CDS sequence in coding orientation.
+
+    Notes
+    -----
+    Many GTFs store stop_codon separately from CDS. Therefore this function
+    reconstructs only CDS features. Stop codon assessment is handled separately.
+    """
+    cds_feats = _features_for_transcript_under_gene(
+        gene,
+        db,
+        featuretype="CDS",
+        transcript_id=transcript_id,
+    )
+
+    if not cds_feats:
+        return ""
+
+    strand = cds_feats[0].strand
+
+    if strand == "+":
+        cds_feats = sorted(cds_feats, key=lambda feat: int(feat.start))
+    elif strand == "-":
+        cds_feats = sorted(cds_feats, key=lambda feat: int(feat.start), reverse=True)
+    else:
+        return ""
+
+    pieces: list[str] = []
+
+    for feat in cds_feats:
+        pieces.append(
+            get_sequence(
+                fasta_dict,
+                feat.seqid,
+                int(feat.start),
+                int(feat.end),
+                strand,
+            )
+        )
+
+    seq = "".join(pieces).upper()
+    usable_len = (len(seq) // 3) * 3
+    return seq[:usable_len]
+
+
+def _stop_codon_sequence_for_terminus(
+    fasta_dict,
+    *,
+    chrom: str,
+    strand: str,
+    stop_start: int,
+    stop_end: int,
+) -> str:
+    """Return the annotated stop codon sequence in coding orientation."""
+    seq = get_sequence(
+        fasta_dict,
+        chrom,
+        int(stop_start),
+        int(stop_end),
+        strand,
+    ).upper()
+
+    return seq if len(seq) == 3 else ""
+
+
+def _translation_based_stop_status_for_transcript(
+    gene,
+    db,
+    fasta_dict,
+    *,
+    transcript_id: str,
+    chrom: str,
+    strand: str,
+    stop_start: int,
+    stop_end: int,
+) -> dict:
+    """
+    Assess whether one transcript cleanly terminates at the queried stop codon.
+
+    Logic
+    -----
+    For a transcript assigned to this terminus:
+    1. It should contain the exact stop_codon feature.
+    2. The terminus stop sequence should translate as '*'.
+    3. CDS + stop should translate with exactly one terminal stop.
+    4. Internal stop codons before the terminal stop are suspicious.
+
+    Returns
+    -------
+    dict with:
+      transcript_id
+      status
+      evidence
+    """
+    stop_feats = _features_for_transcript_under_gene(
+        gene,
+        db,
+        featuretype="stop_codon",
+        transcript_id=transcript_id,
+    )
+
+    has_exact_stop = any(
+        _stop_codon_matches_terminus(
+            stop_feat,
+            chrom=chrom,
+            strand=strand,
+            stop_start=stop_start,
+            stop_end=stop_end,
+        )
+        for stop_feat in stop_feats
+    )
+
+    if not has_exact_stop:
+        return {
+            "transcript_id": transcript_id,
+            "status": "not_assigned_to_exact_stop",
+            "evidence": "transcript lacks exact queried stop_codon feature",
+        }
+
+    cds_seq = _cds_sequence_for_transcript(
+        gene,
+        db,
+        fasta_dict,
+        transcript_id=transcript_id,
+    )
+
+    if not cds_seq:
+        return {
+            "transcript_id": transcript_id,
+            "status": "cds_missing",
+            "evidence": "no CDS sequence reconstructed",
+        }
+
+    stop_seq = _stop_codon_sequence_for_terminus(
+        fasta_dict,
+        chrom=chrom,
+        strand=strand,
+        stop_start=stop_start,
+        stop_end=stop_end,
+    )
+
+    if len(stop_seq) != 3:
+        return {
+            "transcript_id": transcript_id,
+            "status": "invalid_stop_length",
+            "evidence": f"stop_codon sequence length is {len(stop_seq)}",
+        }
+
+    stop_aa = str(Seq(stop_seq).translate(table=1))
+
+    if stop_aa != "*":
+        return {
+            "transcript_id": transcript_id,
+            "status": "queried_stop_does_not_translate_as_stop",
+            "evidence": f"queried stop sequence {stop_seq} translates as {stop_aa}",
+        }
+
+    coding_plus_stop = cds_seq + stop_seq
+    usable_len = (len(coding_plus_stop) // 3) * 3
+    coding_plus_stop = coding_plus_stop[:usable_len]
+
+    protein = str(Seq(coding_plus_stop).translate(table=1))
+
+    if "*" not in protein:
+        return {
+            "transcript_id": transcript_id,
+            "status": "no_stop_in_translation",
+            "evidence": "CDS+queried_stop translation contains no stop codon",
+        }
+
+    stop_positions = [i for i, aa in enumerate(protein) if aa == "*"]
+
+    if stop_positions == [len(protein) - 1]:
+        return {
+            "transcript_id": transcript_id,
+            "status": "clean_terminal_stop",
+            "evidence": "CDS+queried_stop contains single terminal stop",
+        }
+
+    if stop_positions and stop_positions[-1] == len(protein) - 1:
+        return {
+            "transcript_id": transcript_id,
+            "status": "internal_stop_plus_terminal_stop",
+            "evidence": f"internal stop codon(s) at amino-acid positions {stop_positions[:-1]}",
+        }
+
+    return {
+        "transcript_id": transcript_id,
+        "status": "internal_stop_no_terminal_stop",
+        "evidence": f"stop codon(s) at amino-acid positions {stop_positions}, none terminal",
+    }
+
+
+def add_translation_stop_status_columns(
+    attribute_df: pd.DataFrame,
+    db,
+    fasta_dict,
+    *,
     show_progress: bool = True,
-    column_name: str = "potential_readthrough",
 ) -> pd.DataFrame:
     """
-    Add a boolean column marking C-termini that are potential readthrough candidates.
+    Add translation-based stop/readthrough status columns.
 
-    Behaviour
-    ---------
-    - stop_codon rows are evaluated
-    - start_codon rows are always False
+    For start_codon rows:
+        potential_readthrough = False
+        stop_translation_status = "not_applicable"
 
-    Practical use
+    For stop_codon rows:
+        reconstruct CDS for transcript(s) covered by that terminus, append the
+        queried stop codon, translate, and assess whether termination is clean.
+
+    Added columns
     -------------
-    This warns that a given C-terminus may be shared with, or structurally related to,
-    a longer coding isoform, which can matter for C-terminal tagging.
+    - potential_readthrough
+    - stop_translation_status
+    - stop_translation_evidence
+    - readthrough_transcripts
     """
     df = attribute_df.copy()
-    df[column_name] = False
 
-    required = ["gene_id", "chromosome", "gene_strand", "codon_start", "codon_end", "feature"]
-    missing = [c for c in required if c not in df.columns]
+    for col, default in [
+        ("potential_readthrough", False),
+        ("stop_translation_status", "not_applicable"),
+        ("stop_translation_evidence", "none"),
+        ("readthrough_transcripts", "none"),
+    ]:
+        if col not in df.columns:
+            df[col] = default
+
+    if df.empty:
+        return df
+
+    required = [
+        "gene_id",
+        "feature",
+        "chromosome",
+        "gene_strand",
+        "codon_start",
+        "codon_end",
+        "terminus_transcripts",
+    ]
+    missing = [col for col in required if col not in df.columns]
     if missing:
-        raise ValueError(f"add_potential_readthrough_column missing required columns: {missing}")
+        raise ValueError(f"add_translation_stop_status_columns missing required columns: {missing}")
 
-    cache = {}
+    cache: dict[tuple[str, str, str, int, int, tuple[str, ...]], list[dict]] = {}
 
     iterator = df.itertuples(index=True)
     if show_progress:
-        iterator = tqdm(iterator, total=len(df), desc="Annotating readthrough candidates", leave=False)
+        iterator = tqdm(
+            iterator,
+            total=len(df),
+            desc="Translation-based stop/readthrough annotation",
+            leave=False,
+        )
 
     for row in iterator:
         idx = row.Index
 
         if row.feature != "stop_codon":
-            df.at[idx, column_name] = False
+            df.at[idx, "potential_readthrough"] = False
+            df.at[idx, "stop_translation_status"] = "not_applicable"
+            df.at[idx, "stop_translation_evidence"] = "not a stop_codon terminus"
+            df.at[idx, "readthrough_transcripts"] = "none"
             continue
+
+        transcript_labels = _parse_semicolon_list(row.terminus_transcripts)
+
+        if not transcript_labels:
+            df.at[idx, "potential_readthrough"] = False
+            df.at[idx, "stop_translation_status"] = "unknown_no_terminus_transcripts"
+            df.at[idx, "stop_translation_evidence"] = "no transcript labels assigned to terminus"
+            df.at[idx, "readthrough_transcripts"] = "none"
+            continue
+
+        try:
+            gene = db[row.gene_id]
+        except gffutils.exceptions.FeatureNotFoundError:
+            df.at[idx, "potential_readthrough"] = False
+            df.at[idx, "stop_translation_status"] = "unknown_gene_missing"
+            df.at[idx, "stop_translation_evidence"] = "gene not found in database"
+            df.at[idx, "readthrough_transcripts"] = "none"
+            continue
+
+        label_to_id = _transcript_label_to_id_map_for_gene(row.gene_id, db)
+        transcript_ids = [
+            label_to_id.get(label, label)
+            for label in transcript_labels
+        ]
 
         key = (
             row.gene_id,
@@ -486,19 +720,59 @@ def add_potential_readthrough_column(
             row.gene_strand,
             int(row.codon_start),
             int(row.codon_end),
+            tuple(sorted(transcript_ids)),
         )
 
         if key not in cache:
-            cache[key] = _is_potential_readthrough_for_stop(
-                gene_id=row.gene_id,
-                chrom=row.chromosome,
-                strand=row.gene_strand,
-                stop_start=int(row.codon_start),
-                stop_end=int(row.codon_end),
-                db=db,
-            )
+            cache[key] = [
+                _translation_based_stop_status_for_transcript(
+                    gene,
+                    db,
+                    fasta_dict,
+                    transcript_id=tx_id,
+                    chrom=row.chromosome,
+                    strand=row.gene_strand,
+                    stop_start=int(row.codon_start),
+                    stop_end=int(row.codon_end),
+                )
+                for tx_id in transcript_ids
+            ]
 
-        df.at[idx, column_name] = cache[key]
+        results = cache[key]
+
+        statuses = [res["status"] for res in results]
+        evidence = [
+            f"{res['transcript_id']}:{res['status']}({res['evidence']})"
+            for res in results
+        ]
+
+        suspicious_statuses = {
+            "queried_stop_does_not_translate_as_stop",
+            "no_stop_in_translation",
+            "internal_stop_no_terminal_stop",
+            "internal_stop_plus_terminal_stop",
+        }
+
+        suspicious = [
+            res["transcript_id"]
+            for res in results
+            if res["status"] in suspicious_statuses
+        ]
+
+        if suspicious:
+            df.at[idx, "potential_readthrough"] = True
+            df.at[idx, "stop_translation_status"] = "suspicious_stop_translation"
+            df.at[idx, "readthrough_transcripts"] = ";".join(suspicious)
+        elif all(status == "clean_terminal_stop" for status in statuses):
+            df.at[idx, "potential_readthrough"] = False
+            df.at[idx, "stop_translation_status"] = "clean_terminal_stop"
+            df.at[idx, "readthrough_transcripts"] = "none"
+        else:
+            df.at[idx, "potential_readthrough"] = False
+            df.at[idx, "stop_translation_status"] = "uncertain"
+            df.at[idx, "readthrough_transcripts"] = "none"
+
+        df.at[idx, "stop_translation_evidence"] = "; ".join(evidence)
 
     return df
 
@@ -507,7 +781,13 @@ def add_potential_readthrough_column(
 # Main entry point used by the pipeline
 # ---------------------------------------------------------------------
 
-def build_attribute_table(genes: Iterable[str], db, *, verbose: bool = True) -> pd.DataFrame:
+def build_attribute_table(
+    genes: Iterable[str],
+    db,
+    *,
+    fasta_dict=None,
+    verbose: bool = True,
+) -> pd.DataFrame:
     """
     Build an attribute table for codon features for a set of genes.
 
@@ -601,7 +881,18 @@ def build_attribute_table(genes: Iterable[str], db, *, verbose: bool = True) -> 
     # -------------------------------------------------------------
     # Step 5: annotate potential readthrough-like C-termini
     # -------------------------------------------------------------
-    df = add_potential_readthrough_column(df, db, show_progress=verbose)
+    if fasta_dict is not None:
+        df = add_translation_stop_status_columns(
+            df,
+            db,
+            fasta_dict,
+            show_progress=verbose,
+        )
+    else:
+        df["potential_readthrough"] = False
+        df["stop_translation_status"] = "not_assessed_no_fasta"
+        df["stop_translation_evidence"] = "fasta_dict was not provided"
+        df["readthrough_transcripts"] = "none"
 
     # -------------------------------------------------------------
     # Step 6: report missing genes, if any
