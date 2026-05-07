@@ -52,12 +52,12 @@ import numpy as np
 import pandas as pd
 
 DEFAULT_SCORING_WEIGHTS = {
-    "w_cut": 0.25,
-    "w_rs3": 0.20,
-    "w_offtarget": 0.40,
-    "w_edit": 0.15,
+    "w_cut": 0.23,
+    "w_rs3": 0.18,
+    "w_offtarget": 0.37,
+    "w_edit": 0.12,
+    "w_blocking": 0.10,
     "max_cut_distance": 30,
-    "dist_decay": 10,
 }
 
 def _first_present(df: pd.DataFrame, candidates: list[str]) -> str | None:
@@ -133,7 +133,7 @@ def add_guide_selection_score(
     w_rs3: float = DEFAULT_SCORING_WEIGHTS["w_rs3"],
     w_offtarget: float = DEFAULT_SCORING_WEIGHTS["w_offtarget"],
     w_edit: float = DEFAULT_SCORING_WEIGHTS["w_edit"],
-    dist_decay: float = DEFAULT_SCORING_WEIGHTS["dist_decay"],
+    w_blocking: float = DEFAULT_SCORING_WEIGHTS["w_blocking"],
 ) -> pd.DataFrame:
     """
     Add guide-selection fields.
@@ -266,17 +266,30 @@ def add_guide_selection_score(
     edit_score.loc[rejected] = 0.1
 
     # ------------------------------------------------------------
-    # 6. Composite score
+    # 6. Blocking-edit component
+    # ------------------------------------------------------------
+    if "blocking_priority_score" in out.columns:
+        blocking_score = (
+            pd.to_numeric(out["blocking_priority_score"], errors="coerce")
+            .fillna(0.0)
+            .clip(0.0, 1.0)
+        )
+    else:
+        blocking_score = pd.Series(0.0, index=out.index)
+
+    # ------------------------------------------------------------
+    # 7. Composite score
     # ------------------------------------------------------------
     out["selection_score"] = (
-        w_cut * cut_score
+        w_cut * cut_norm
         + w_rs3 * rs3_norm
         + w_offtarget * off_score
         + w_edit * edit_score
+        + w_blocking * blocking_score
     )
 
     # ------------------------------------------------------------
-    # 7. Human-readable warnings
+    # 8. Human-readable warnings
     # ------------------------------------------------------------
     warnings: list[str] = []
     for _, row in out.iterrows():
@@ -301,6 +314,12 @@ def add_guide_selection_score(
             if reason in (None, "", "none"):
                 reason = "requires non-coding HA edit"
             w.append(f"last-resort guide: {reason}")
+        
+        strategy = str(row.get("blocking_mutation_strategy", "none"))
+        if strategy == "none" and str(row.get("requires_edit_arm", "none")) != "none":
+            w.append("no successful donor blocking mutation")
+        elif strategy == "double_distal_spacer":
+            w.append("blocking mutations are distal; review manually")
 
         warnings.append("; ".join(w) if w else "none")
 

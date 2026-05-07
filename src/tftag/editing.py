@@ -521,6 +521,8 @@ def apply_silent_edits(
         ("blocking_mutation_count", 0),
         ("blocking_mutation_strategy", "none"),
         ("blocking_mutation_zone", "none"),
+        ("primary_blocking_position", np.nan),
+        ("blocking_priority_score", 0.0),
     ]:
         if col not in df.columns:
             df[col] = default
@@ -754,6 +756,26 @@ def apply_silent_edits(
         )
 
         n_muts = len(hal_muts) + len(har_muts)
+        all_muts = hal_muts + har_muts
+        guide_positions = [
+            m.get("guide_position")
+            for m in all_muts
+            if m.get("guide_position") is not None
+        ]
+
+        primary_pos = max(guide_positions) if guide_positions else np.nan
+
+        if mutation_strategy == "single_pam_gg":
+            priority_score = 1.0
+        elif mutation_strategy == "single_pam_proximal_spacer":
+            priority_score = 0.8
+        elif mutation_strategy == "double_distal_spacer":
+            priority_score = 0.4
+        else:
+            priority_score = 0.0
+
+        work.at[idx, "primary_blocking_position"] = primary_pos
+        work.at[idx, "blocking_priority_score"] = priority_score
         work.at[idx, "blocking_mutation_count"] = n_muts
         work.at[idx, "blocking_mutation_strategy"] = mutation_strategy
         work.at[idx, "blocking_mutation_zone"] = mutation_zone
