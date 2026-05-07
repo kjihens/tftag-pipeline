@@ -58,6 +58,7 @@ DEFAULT_SCORING_WEIGHTS = {
     "w_edit": 0.12,
     "w_blocking": 0.10,
     "max_cut_distance": 30,
+    "dist_decay": 10,
 }
 
 def _first_present(df: pd.DataFrame, candidates: list[str]) -> str | None:
@@ -134,6 +135,7 @@ def add_guide_selection_score(
     w_offtarget: float = DEFAULT_SCORING_WEIGHTS["w_offtarget"],
     w_edit: float = DEFAULT_SCORING_WEIGHTS["w_edit"],
     w_blocking: float = DEFAULT_SCORING_WEIGHTS["w_blocking"],
+    dist_decay: float = DEFAULT_SCORING_WEIGHTS["dist_decay"],
 ) -> pd.DataFrame:
     """
     Add guide-selection fields.
