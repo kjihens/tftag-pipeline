@@ -15,6 +15,25 @@ An arm requires mutation only if it contains:
 
 If the donor does not include the PAM, it cannot recreate a functional SpCas9
 target site, so no edit is required.
+
+Blocking-mutation strategy
+--------------------------
+For SpCas9 NGG, donor-blocking mutations are prioritised as follows:
+
+1. Try one synonymous mutation in the PAM GG:
+   - guide position 22
+   - guide position 23
+
+2. If PAM-GG mutation is not possible, try one synonymous mutation in the
+   PAM-proximal protospacer positions:
+   - guide positions 20, 19, 18, 17
+
+3. If no synonymous mutation is possible in those high-value positions, try two
+   synonymous mutations in more distal protospacer positions:
+   - guide positions 16 down to 1
+
+PAM position 21 is the N in NGG and is deliberately not used as a PAM-breaking
+edit.
 """
 
 from __future__ import annotations
@@ -150,6 +169,9 @@ def _two_synonymous_changes_near(
 ) -> Optional[Tuple[str, List[Dict]]]:
     """
     Try to apply two synonymous changes using candidate indices in priority order.
+
+    Returns only if two synonymous changes can be made. This is deliberate: outside
+    the highest-value PAM/PAM-proximal positions, we require two blocking edits.
     """
     seq = coding_seq
     muts: list[dict] = []
@@ -215,6 +237,53 @@ def _frame_anchor_for_arm(*, feature: str, target_arm: str, arm_len: int) -> int
     raise ValueError(
         f"Unsupported frame anchor request: feature={feature}, target_arm={target_arm}"
     )
+
+
+def _guide_pam_index_to_genomic(
+    *,
+    guide_idx: int,
+    pam_start: int,
+    pam_end: int,
+    grna_strand: str,
+) -> int:
+    """
+    Convert PAM index in guide orientation to genomic coordinate.
+
+    guide_idx is 0-based within the PAM:
+      0 = guide position 21, PAM N
+      1 = guide position 22, PAM G
+      2 = guide position 23, PAM G
+    """
+    if grna_strand == "+":
+        return pam_start + guide_idx
+    if grna_strand == "-":
+        return pam_end - guide_idx
+    raise ValueError("grna_strand must be '+' or '-'")
+
+
+def _guide_spacer_position_to_genomic(
+    *,
+    guide_pos: int,
+    protospacer_start: int,
+    protospacer_end: int,
+    grna_strand: str,
+) -> int:
+    """
+    Convert guide-orientation spacer position to genomic coordinate.
+
+    guide_pos is 1-based within the 20 nt protospacer:
+      1  = PAM-distal spacer base
+      20 = PAM-proximal spacer base
+    """
+    if guide_pos < 1 or guide_pos > 20:
+        raise ValueError("guide_pos must be in 1..20")
+
+    if grna_strand == "+":
+        return protospacer_start + (guide_pos - 1)
+    if grna_strand == "-":
+        return protospacer_end - (guide_pos - 1)
+
+    raise ValueError("grna_strand must be '+' or '-'")
 
 
 def choose_arm_for_mutation(
@@ -434,6 +503,9 @@ def apply_silent_edits(
     - HAL_mutation_location
     - HAR_mutation_location
     - edit_arm
+    - blocking_mutation_count
+    - blocking_mutation_strategy
+    - blocking_mutation_zone
     """
     df = gRNA_df.copy()
 
@@ -446,6 +518,9 @@ def apply_silent_edits(
         ("HAL_mutation_location", "none"),
         ("HAR_mutation_location", "none"),
         ("edit_arm", "none"),
+        ("blocking_mutation_count", 0),
+        ("blocking_mutation_strategy", "none"),
+        ("blocking_mutation_zone", "none"),
     ]:
         if col not in df.columns:
             df[col] = default
@@ -534,30 +609,25 @@ def apply_silent_edits(
                 hal_muts.append(record)
 
         did_edit = False
+        mutation_strategy = "none"
+        mutation_zone = "none"
 
-        # ---------- (1) Try single synonymous mutation in PAM GG only ----------
-        # PAM in guide orientation occupies positions:
-        #   21 = N
-        #   22 = G
-        #   23 = G
-        #
-        # Mutating position 21 does not break SpCas9 NGG recognition, so we only
-        # attempt synonymous edits at guide-PAM indices 1 and 2.
-        
+        # ------------------------------------------------------------
+        # Priority 1: one synonymous mutation in PAM GG.
+        # ------------------------------------------------------------
         pam_seq_guide = str(rowd.get("pam_seq", "")).upper()
 
         if len(pam_seq_guide) == 3:
-            pam_gg_guide_indices = [
-                guide_idx
-                for guide_idx, base in enumerate(pam_seq_guide)
-                if guide_idx in (1, 2) and base == "G"
-            ]
+            for pam_idx in (1, 2):
+                if pam_seq_guide[pam_idx] != "G":
+                    continue
 
-            for guide_idx in pam_gg_guide_indices:
-                if grna_strand == "+":
-                    gpos = pam_s + guide_idx
-                else:
-                    gpos = pam_e - guide_idx
+                gpos = _guide_pam_index_to_genomic(
+                    guide_idx=pam_idx,
+                    pam_start=pam_s,
+                    pam_end=pam_e,
+                    grna_strand=grna_strand,
+                )
 
                 arm_idx = _genomic_to_coding_index(
                     gpos,
@@ -569,75 +639,97 @@ def apply_silent_edits(
                 if arm_idx is None:
                     continue
 
-                attempt = _try_synonymous_change(
-                    arm_seq,
-                    arm_idx,
-                    anchor=anchor,
-                )
-
+                attempt = _try_synonymous_change(arm_seq, arm_idx, anchor=anchor)
                 if attempt is not None:
                     arm_seq, rec = attempt
+                    rec["guide_position"] = 21 + pam_idx
+                    rec["blocking_zone"] = "PAM_GG"
                     append_mut(rec)
                     did_edit = True
+                    mutation_strategy = "single_pam_gg"
+                    mutation_zone = "PAM_GG"
                     break
 
+        # ------------------------------------------------------------
+        # Priority 2: one synonymous mutation in guide positions 20..17.
+        # ------------------------------------------------------------
         if not did_edit:
-            prot_positions = list(range(prot_s, prot_e + 1))
-            prot_idxs = _indices_within_arm(
-                arm_start,
-                arm_end,
-                gene_strand,
-                prot_positions,
-            )
+            for guide_pos in (20, 19, 18, 17):
+                gpos = _guide_spacer_position_to_genomic(
+                    guide_pos=guide_pos,
+                    protospacer_start=prot_s,
+                    protospacer_end=prot_e,
+                    grna_strand=grna_strand,
+                )
 
-            if prot_idxs:
-                pam_edge_pos = prot_e if grna_strand == "+" else prot_s
-                pam_edge_idx = _genomic_to_coding_index(
-                    pam_edge_pos,
+                arm_idx = _genomic_to_coding_index(
+                    gpos,
                     arm_start,
                     arm_end,
                     gene_strand,
                 )
 
-                if pam_edge_idx is not None:
-                    prot_idxs = sorted(prot_idxs, key=lambda i: (abs(i - pam_edge_idx), i))
+                if arm_idx is None:
+                    continue
 
-                for prot_idx in prot_idxs:
-                    attempt = _try_synonymous_change(arm_seq, prot_idx, anchor=anchor)
-                    if attempt is not None:
-                        arm_seq, rec = attempt
-                        append_mut(rec)
-                        did_edit = True
-                        break
-
-        if not did_edit:
-            prot_positions = list(range(prot_s, prot_e + 1))
-            prot_idxs = _indices_within_arm(
-                arm_start,
-                arm_end,
-                gene_strand,
-                prot_positions,
-            )
-
-            if prot_idxs:
-                pam_edge_pos = prot_e if grna_strand == "+" else prot_s
-                pam_edge_idx = _genomic_to_coding_index(
-                    pam_edge_pos,
-                    arm_start,
-                    arm_end,
-                    gene_strand,
-                )
-
-                if pam_edge_idx is not None:
-                    prot_idxs = sorted(prot_idxs, key=lambda i: (abs(i - pam_edge_idx), i))
-
-                attempt = _two_synonymous_changes_near(arm_seq, prot_idxs, anchor=anchor)
-
+                attempt = _try_synonymous_change(arm_seq, arm_idx, anchor=anchor)
                 if attempt is not None:
-                    arm_seq, muts = attempt
-                    for rec in muts:
-                        append_mut(rec)
+                    arm_seq, rec = attempt
+                    rec["guide_position"] = guide_pos
+                    rec["blocking_zone"] = "PAM_proximal_spacer_17_20"
+                    append_mut(rec)
                     did_edit = True
+                    mutation_strategy = "single_pam_proximal_spacer"
+                    mutation_zone = "PAM_proximal_spacer_17_20"
+                    break
+
+        # ------------------------------------------------------------
+        # Priority 3: two synonymous mutations in distal spacer positions.
+        # ------------------------------------------------------------
+        if not did_edit:
+            distal_arm_indices: list[int] = []
+            distal_guide_positions: list[int] = []
+
+            for guide_pos in range(16, 0, -1):
+                gpos = _guide_spacer_position_to_genomic(
+                    guide_pos=guide_pos,
+                    protospacer_start=prot_s,
+                    protospacer_end=prot_e,
+                    grna_strand=grna_strand,
+                )
+
+                arm_idx = _genomic_to_coding_index(
+                    gpos,
+                    arm_start,
+                    arm_end,
+                    gene_strand,
+                )
+
+                if arm_idx is None:
+                    continue
+
+                distal_arm_indices.append(arm_idx)
+                distal_guide_positions.append(guide_pos)
+
+            attempt = _two_synonymous_changes_near(
+                arm_seq,
+                distal_arm_indices,
+                anchor=anchor,
+            )
+
+            if attempt is not None:
+                arm_seq, muts = attempt
+
+                # Attach guide-position metadata back to the two chosen mutations.
+                idx_to_guide_pos = dict(zip(distal_arm_indices, distal_guide_positions))
+                for rec in muts:
+                    rec["guide_position"] = idx_to_guide_pos.get(rec["idx"], None)
+                    rec["blocking_zone"] = "distal_spacer_1_16"
+                    append_mut(rec)
+
+                did_edit = True
+                mutation_strategy = "double_distal_spacer"
+                mutation_zone = "distal_spacer_1_16"
 
         work.at[idx, "edit_arm"] = target_arm
 
@@ -661,10 +753,18 @@ def apply_silent_edits(
             har_muts,
         )
 
+        n_muts = len(hal_muts) + len(har_muts)
+        work.at[idx, "blocking_mutation_count"] = n_muts
+        work.at[idx, "blocking_mutation_strategy"] = mutation_strategy
+        work.at[idx, "blocking_mutation_zone"] = mutation_zone
+
         if not did_edit:
             work.at[idx, "warnings"] = merge_warn(
                 work.at[idx, "warnings"],
-                f"No synonymous mutation could be applied in target {target_arm} arm",
+                (
+                    f"No sufficient synonymous blocking mutation could be applied in "
+                    f"target {target_arm} arm"
+                ),
             )
 
     out = df.copy()
