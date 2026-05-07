@@ -5,7 +5,7 @@ Pipeline overview
 -----------------
 1. Build a terminus table from genome annotation.
 2. Scan each terminus for nearby NGG PAMs.
-3. Optionally annotate stock-specific guide compatibility.
+3. Optionally annotate strain-specific guide compatibility.
 4. Mark non-designable guides as rejected.
 5. Score retained guides with RS3.
 6. Run Cas-OFFinder on retained guides and optionally reject poor-specificity guides.
@@ -41,7 +41,7 @@ import uuid
 
 import numpy as np
 
-from . import annotate, efficiency, scan, stockcheck, splicecheck
+from . import annotate, efficiency, scan, straincheck, splicecheck
 from .editing import apply_silent_edits, choose_arm_for_mutation
 from .genome_io import create_gtf_db, load_fasta_dict
 from .helpers import filter_by_offtarget_mismatch, parse_genes_arg
@@ -92,11 +92,11 @@ def make_run_parameters(
     selection: str,
     write_csv: bool,
     write_parquet: bool,
-    check_stock_vcf_compatibility: bool,
-    check_stock_variants: bool,
-    stock_identical_only: bool,
-    stock_vcfs: dict[str, str],
-    chrom_to_stock: dict[str, str],
+    check_strain_vcf_compatibility: bool,
+    check_strain_variants: bool,
+    strain_identical_only: bool,
+    strain_vcfs: dict[str, str],
+    chrom_to_strain: dict[str, str],
     codon_choice: str = "gc",
     codon_usage_table: str | None = None,
     force_recompute_codon_usage: bool = False,
@@ -131,11 +131,11 @@ def make_run_parameters(
         "guide_scoring_weights": DEFAULT_SCORING_WEIGHTS,
         "write_csv": write_csv,
         "write_parquet": write_parquet,
-        "check_stock_vcf_compatibility": check_stock_vcf_compatibility,
-        "check_stock_variants": check_stock_variants,
-        "stock_identical_only": stock_identical_only,
-        "stock_vcfs": stock_vcfs,
-        "chrom_to_stock": chrom_to_stock,
+        "check_strain_vcf_compatibility": check_strain_vcf_compatibility,
+        "check_strain_variants": check_strain_variants,
+        "strain_identical_only": strain_identical_only,
+        "strain_vcfs": strain_vcfs,
+        "chrom_to_strain": chrom_to_strain,
         "codon_choice": codon_choice,
         "codon_usage_table": codon_usage_table,
         "force_recompute_codon_usage": force_recompute_codon_usage,
@@ -193,11 +193,11 @@ def run_pipeline(
     selection: str = "all",
     write_csv: bool = True,
     write_parquet: bool = True,
-    stock_vcfs: dict[str, str] | None = None,
-    chrom_to_stock: dict[str, str] | None = None,
-    check_stock_vcf_compatibility: bool = False,
-    check_stock_variants: bool = False,
-    stock_identical_only: bool = False,
+    strain_vcfs: dict[str, str] | None = None,
+    chrom_to_strain: dict[str, str] | None = None,
+    check_strain_vcf_compatibility: bool = False,
+    check_strain_variants: bool = False,
+    strain_identical_only: bool = False,
     codon_choice: str = "gc",
     codon_usage_table: str | None = None,
     force_recompute_codon_usage: bool = False,
@@ -250,8 +250,8 @@ def run_pipeline(
     os.makedirs(outdir, exist_ok=True)
 
     run_id = uuid.uuid4().hex[:12]
-    stock_vcfs = stock_vcfs or {}
-    chrom_to_stock = chrom_to_stock or {}
+    strain_vcfs = strain_vcfs or {}
+    chrom_to_strain = chrom_to_strain or {}
 
     logger = TFTagRunLogger(outdir=outdir, basename=basename, run_id=run_id)
 
@@ -279,46 +279,46 @@ def run_pipeline(
             selection=selection,
             write_csv=write_csv,
             write_parquet=write_parquet,
-            check_stock_vcf_compatibility=check_stock_vcf_compatibility,
-            check_stock_variants=check_stock_variants,
-            stock_identical_only=stock_identical_only,
-            stock_vcfs=stock_vcfs,
-            chrom_to_stock=chrom_to_stock,
+            check_strain_vcf_compatibility=check_strain_vcf_compatibility,
+            check_strain_variants=check_strain_variants,
+            strain_identical_only=strain_identical_only,
+            strain_vcfs=strain_vcfs,
+            chrom_to_strain=chrom_to_strain,
         )
     )
 
     try:
         # ------------------------------------------------------------
-        # Validate stock VCF arguments and optionally check compatibility
+        # Validate strain VCF arguments and optionally check compatibility
         # ------------------------------------------------------------
-        if check_stock_vcf_compatibility and not stock_vcfs:
-            raise ValueError("No stock VCFs supplied. Use --stock_vcf NAME=PATH.")
+        if check_strain_vcf_compatibility and not strain_vcfs:
+            raise ValueError("No strain VCFs supplied. Use --strain_vcf NAME=PATH.")
 
-        if check_stock_variants and not stock_vcfs:
+        if check_strain_variants and not strain_vcfs:
             raise ValueError(
-                "Stock variant checking requested, but no stock VCFs were supplied."
+                "strain variant checking requested, but no strain VCFs were supplied."
             )
 
-        if check_stock_variants and not chrom_to_stock:
+        if check_strain_variants and not chrom_to_strain:
             raise ValueError(
-                "Stock variant checking requested, but no chromosome-to-stock mapping was supplied."
+                "strain variant checking requested, but no chromosome-to-strain mapping was supplied."
             )
 
-        if check_stock_variants:
-            for _stock_name, vcf_path in stock_vcfs.items():
-                stockcheck.ensure_fetchable_vcf(vcf_path)
+        if check_strain_variants:
+            for _strain_name, vcf_path in strain_vcfs.items():
+                straincheck.ensure_fetchable_vcf(vcf_path)
 
-        if check_stock_vcf_compatibility:
-            logger.log("Checking stock VCF compatibility with reference FASTA...")
+        if check_strain_vcf_compatibility:
+            logger.log("Checking strain VCF compatibility with reference FASTA...")
 
-            for stock_name, vcf_path in stock_vcfs.items():
-                summary = stockcheck.check_vcf_reference_compatibility(
+            for strain_name, vcf_path in strain_vcfs.items():
+                summary = straincheck.check_vcf_reference_compatibility(
                     vcf_path=vcf_path,
                     fasta_path=genome_fasta_path,
                     max_records=10000,
                 )
 
-                logger.log(f"\nStock: {stock_name}")
+                logger.log(f"\nstrain: {strain_name}")
                 logger.log(f"  VCF: {summary['vcf_path']}")
                 logger.log(f"  Records checked: {summary['n_records_checked']}")
                 logger.log(f"  REF mismatches: {summary['n_ref_mismatches']}")
@@ -345,15 +345,15 @@ def run_pipeline(
                     for ex in summary["mismatch_examples"]:
                         logger.log(f"    {ex}")
 
-        if check_stock_vcf_compatibility and not check_stock_variants:
+        if check_strain_vcf_compatibility and not check_strain_variants:
             logger.add_summary(
-                "Stock VCF compatibility",
+                "strain VCF compatibility",
                 {
                     "status": "completed",
-                    "n_stock_vcfs": len(stock_vcfs),
+                    "n_strain_vcfs": len(strain_vcfs),
                 },
             )
-            logger.log("Stock VCF compatibility check completed.")
+            logger.log("strain VCF compatibility check completed.")
             logger.success()
             return
 
@@ -434,53 +434,53 @@ def run_pipeline(
         candidates = scan.add_grna_23_coordinates(candidates)
 
         # ------------------------------------------------------------
-        # Optional stock-specific guide compatibility annotation
+        # Optional strain-specific guide compatibility annotation
         # ------------------------------------------------------------
-        if check_stock_variants:
-            logger.log("Annotating candidate guides against stock VCFs...")
+        if check_strain_variants:
+            logger.log("Annotating candidate guides against strain VCFs...")
 
-            candidates = stockcheck.annotate_stock_variants(
+            candidates = straincheck.annotate_strain_variants(
                 guides_df=candidates,
-                stock_vcfs=stock_vcfs,
-                chrom_to_stock=chrom_to_stock,
+                strain_vcfs=strain_vcfs,
+                chrom_to_strain=chrom_to_strain,
                 reference_fasta_path=genome_fasta_path,
                 show_progress=True,
             )
 
-            pam_mutated = candidates["stock_pam_gg_mutated"].fillna(True).astype(bool)
+            pam_mutated = candidates["strain_pam_gg_mutated"].fillna(True).astype(bool)
             rejected_pam = int(pam_mutated.sum())
 
             candidates = mark_rejected(
                 candidates,
                 pam_mutated,
-                "stock_pam_gg_mutated",
+                "strain_pam_gg_mutated",
             )
 
             if rejected_pam:
                 logger.log(
-                    f"Marked {rejected_pam} guides rejected due to PAM GG mutation in assigned stock."
+                    f"Marked {rejected_pam} guides rejected due to PAM GG mutation in assigned strain."
                 )
 
             rejected_nonidentical = 0
 
-            if stock_identical_only:
-                nonidentical = ~candidates["stock_seq_matches_ref"].astype("boolean").fillna(False)
+            if strain_identical_only:
+                nonidentical = ~candidates["strain_seq_matches_ref"].astype("boolean").fillna(False)
                 rejected_nonidentical = int(nonidentical.sum())
 
                 candidates = mark_rejected(
                     candidates,
                     nonidentical,
-                    "stock_nonidentical_23mer",
+                    "strain_nonidentical_23mer",
                 )
 
                 if rejected_nonidentical:
                     logger.log(
                         f"Marked {rejected_nonidentical} guides rejected due to "
-                        "--stock_identical_only."
+                        "--strain_identical_only."
                     )
 
             logger.add_summary(
-                "Stock filtering",
+                "strain filtering",
                 {
                     "rejected_pam_gg_mutated": rejected_pam,
                     "rejected_nonidentical": rejected_nonidentical,

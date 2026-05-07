@@ -7,8 +7,8 @@ from .pipeline import run_pipeline
 from .cli_parsers import (
     parse_name_path,
     parse_name_chroms,
-    build_stock_vcf_dict,
-    build_chrom_to_stock_map,
+    build_strain_vcf_dict,
+    build_chrom_to_strain_map,
 )
 
 
@@ -22,8 +22,8 @@ def main():
     ap.add_argument("--db", default="gtf.db", help="Path to gffutils sqlite DB (created if absent).")
     ap.add_argument("--fasta", required=True, help="Genome FASTA (used for sequence extraction).")
     ap.add_argument("--genes", default=None, help="Either (a) path to a file with one gene ID per line, or (b) comma-separated gene IDs.")
-    ap.add_argument("--stock-vcf", action="append", type=parse_name_path, default=[], metavar="NAME=PATH", help=("Named stock VCF. Repeatable. Example: "
-            "--stock_vcf attP40=Cas9_on_3.mapping.vcf"
+    ap.add_argument("--strain-vcf", action="append", type=parse_name_path, default=[], metavar="NAME=PATH", help=("Named strain VCF. Repeatable. Example: "
+            "--strain_vcf attP40=Cas9_on_3.mapping.vcf"
         )
     )
     
@@ -65,17 +65,17 @@ def main():
     ap.add_argument("--offtarget-batch-size", type=int, default=500, help="Number of unique spacers per Cas-OFFinder batch.")
 
     # variant checking
-    ap.add_argument("--stock-group", action="append", type=parse_name_chroms, default=[], metavar="NAME=CHR1,CHR2,...", help=("Assign chromosomes to a named stock. Repeatable. Example: "
-            "--stock-group attP40=3L,3R --stock-group attP2=2L,2R,X,4,Y"
+    ap.add_argument("--strain-group", action="append", type=parse_name_chroms, default=[], metavar="NAME=CHR1,CHR2,...", help=("Assign chromosomes to a named strain. Repeatable. Example: "
+            "--strain-group attP40=3L,3R --strain-group attP2=2L,2R,X,4,Y"
         )
     )
-    ap.add_argument("--check-stock-vcf-compatibility", action="store_true", help=(
-            "Validate that each supplied stock VCF matches the reference FASTA "
+    ap.add_argument("--check-strain-vcf-compatibility", action="store_true", help=(
+            "Validate that each supplied strain VCF matches the reference FASTA "
             "(contigs, lengths, REF alleles at sampled/all checked variant sites)."
         )
     )
-    ap.add_argument("--check-stock-variants", action="store_true", help=(
-            "Annotate candidate guides against the relevant stock VCF for the chromosome."
+    ap.add_argument("--check-strain-variants", action="store_true", help=(
+            "Annotate candidate guides against the relevant strain VCF for the chromosome."
         )
     )
 
@@ -101,17 +101,17 @@ def main():
 
     # Selection
     ap.add_argument("--selection", choices=["all", "closest", "rs3", "score"], default="all", help="Return all guides, or select one guide per gene per terminus (start/stop)")
-    ap.add_argument("--stock-identical-only", action="store_true", help=("Guide selection mode. all keeps all guides; closest, rs3, and score "
+    ap.add_argument("--strain-identical-only", action="store_true", help=("Guide selection mode. all keeps all guides; closest, rs3, and score "
                                                                          "select one guide per gene terminus. score uses composite ranking."
                                                                          )
     )
 
     args = ap.parse_args()
 
-    stock_vcfs = build_stock_vcf_dict(args.stock_vcf)
-    chrom_to_stock = build_chrom_to_stock_map(
-        args.stock_group,
-        known_stock_names=set(stock_vcfs.keys())
+    strain_vcfs = build_strain_vcf_dict(args.strain_vcf)
+    chrom_to_strain = build_chrom_to_strain_map(
+        args.strain_group,
+        known_strain_names=set(strain_vcfs.keys())
     )
 
     run_pipeline(
@@ -137,11 +137,11 @@ def main():
         protospacer_overlap_len=args.protospacer_overlap_len,
         write_csv=args.write_csv,
         write_parquet=args.write_parquet,
-        stock_vcfs=stock_vcfs,
-        chrom_to_stock=chrom_to_stock,
-        check_stock_vcf_compatibility=args.check_stock_vcf_compatibility,
-        check_stock_variants=args.check_stock_variants,
-        stock_identical_only=args.stock_identical_only,
+        strain_vcfs=strain_vcfs,
+        chrom_to_strain=chrom_to_strain,
+        check_strain_vcf_compatibility=args.check_strain_vcf_compatibility,
+        check_strain_variants=args.check_strain_variants,
+        strain_identical_only=args.strain_identical_only,
         codon_choice=args.codon_choice,
         codon_usage_table=args.codon_usage_table,
         force_recompute_codon_usage=args.force_recompute_codon_usage,

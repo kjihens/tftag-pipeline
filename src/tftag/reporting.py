@@ -131,7 +131,7 @@ def drop_internal_columns(candidates: pd.DataFrame) -> pd.DataFrame:
         "pam_end",
         "designable",
         "skip_reason",
-        "stock_pam_gg_mutated",
+        "strain_pam_gg_mutated",
         "HALs",
         "HARs",
         "HALe",

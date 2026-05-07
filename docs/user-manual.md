@@ -10,7 +10,7 @@ TFTag integrates:
 
 * transcript-aware annotation parsing,
 * strand-aware gRNA discovery,
-* stock-specific sequence validation,
+* strain-specific sequence validation,
 * off-target analysis,
 * donor engineering,
 * splice-aware synonymous blocking mutation design,
@@ -139,12 +139,12 @@ The pipeline therefore:
 
 ---
 
-## Stock-Aware Design
+## Injection strain-Aware Design
 
 * VCF compatibility checking
-* Stock-specific guide reconstruction
+* Injection strain-specific guide reconstruction
 * PAM mutation detection
-* Chromosome-specific stock assignment
+* Chromosome-specific injection strain assignment
 
 ---
 
@@ -256,27 +256,27 @@ or:
 
 ---
 
-## 5.4 Stock VCF Input
+## 5.4 Injection strain VCF Input
 
-TFTag supports stock-aware design using VCF files.
+TFTag supports strain-aware design using VCF files.
 
 Example:
 
 ```bash
---stock-vcf attP40=Cas9_on_2.vcf.gz
---stock-vcf attP2=Cas9_on_3.vcf.gz
+--strain-vcf attP40=Cas9_on_2.vcf.gz
+--strain-vcf attP2=Cas9_on_3.vcf.gz
 ```
 
 Chromosome assignment:
 
 ```bash
---stock-group attP40=3L,3R
---stock-group attP2=2L,2R,X
+--strain-group attP40=3L,3R
+--strain-group attP2=2L,2R,X
 ```
 
 This allows the pipeline to:
 
-* reconstruct stock-specific guide sequences,
+* reconstruct Injection strain-specific guide sequences,
 * identify PAM-disrupting polymorphisms,
 * reject incompatible guides.
 
@@ -411,16 +411,16 @@ HDR efficiency generally decreases with increasing cut distance.
 
 ---
 
-# 6.3 Stage C — Stock-Aware Sequence Checking
+# 6.3 Stage C — Injection strain-Aware Sequence Checking
 
-The stock-check module reconstructs guide sequences after applying VCF variants.
+The strain-check module reconstructs guide sequences after applying VCF variants.
 
 ## Behaviour
 
 For each guide:
 
 1. overlapping variants are fetched,
-2. stock-specific sequence is reconstructed,
+2. Injection strain-specific sequence is reconstructed,
 3. PAM integrity is evaluated.
 
 ---
@@ -429,8 +429,8 @@ For each guide:
 
 | Reason                     | Meaning                      |
 | -------------------------- | ---------------------------- |
-| `stock_pam_gg_mutated`     | PAM GG disrupted             |
-| `stock_nonidentical_23mer` | Guide differs from reference |
+| `strain_pam_gg_mutated`     | PAM GG disrupted             |
+| `strain_nonidentical_23mer` | Guide differs from reference |
 
 ---
 
@@ -944,7 +944,7 @@ Potential causes:
 * no NGG PAMs near the terminus,
 * chromosome naming mismatch,
 * aggressive cut-distance filtering,
-* stock-specific PAM mutations.
+* Injection strain-specific PAM mutations.
 
 ---
 
@@ -988,7 +988,7 @@ Always record:
 * mismatch threshold,
 * scoring weights,
 * RS3 model,
-* stock VCF versions,
+* Injection strain VCF versions,
 * TFTag version.
 
 ---
