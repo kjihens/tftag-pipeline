@@ -41,7 +41,7 @@ import uuid
 
 import numpy as np
 
-from . import annotate, efficiency, scan, stockcheck
+from . import annotate, efficiency, scan, stockcheck, splicecheck
 from .editing import apply_silent_edits, choose_arm_for_mutation
 from .genome_io import create_gtf_db, load_fasta_dict
 from .helpers import filter_by_offtarget_mismatch, parse_genes_arg
@@ -399,6 +399,12 @@ def run_pipeline(
         # From here on, every scanned guide has explicit lifecycle state.
         candidates = initialise_guide_status(candidates)
         candidates = scan.add_grna_23_coordinates(candidates)
+
+        candidates = splicecheck.annotate_splice_overlap(
+            candidates,
+            db,
+            show_progress=True,
+        )
 
         # ------------------------------------------------------------
         # Optional stock-specific guide compatibility annotation
