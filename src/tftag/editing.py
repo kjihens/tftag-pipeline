@@ -7,33 +7,35 @@ Responsibilities
 - Mark which arm, if any, requires mutation.
 - Apply synonymous edits where possible to prevent re-cutting.
 
-Editing rule
-------------
-An arm requires mutation only if it contains:
-- the full PAM
-- at least N PAM-proximal protospacer bases
-
-If the donor does not include the PAM, it cannot recreate a functional SpCas9
-target site, so no edit is required.
-
 Blocking-mutation strategy
 --------------------------
 For SpCas9 NGG, donor-blocking mutations are prioritised as follows:
 
-1. Try one synonymous mutation in the PAM GG:
+1. One synonymous mutation in PAM GG:
    - guide position 22
    - guide position 23
 
-2. If PAM-GG mutation is not possible, try one synonymous mutation in the
-   PAM-proximal protospacer positions:
+2. If PAM-GG mutation is not possible, one synonymous mutation in the
+   PAM-proximal protospacer:
    - guide positions 20, 19, 18, 17
 
-3. If no synonymous mutation is possible in those high-value positions, try two
+3. If no synonymous mutation is possible in those high-value positions, two
    synonymous mutations in more distal protospacer positions:
    - guide positions 16 down to 1
 
 PAM position 21 is the N in NGG and is deliberately not used as a PAM-breaking
 edit.
+
+Codon-choice strategy
+---------------------
+When several synonymous codons are possible, edits can be chosen by:
+
+- codon_choice="gc":
+    choose the synonymous codon that best preserves GC content
+
+- codon_choice="usage":
+    choose the synonymous codon whose usage frequency is closest to the original
+    codon, using a codon_usage_lookup dictionary
 """
 
 from __future__ import annotations
@@ -45,6 +47,7 @@ import pandas as pd
 from Bio.Seq import Seq
 from tqdm.auto import tqdm
 
+from .codon_usage import choose_synonymous_codon
 from .utils import merge_warn
 
 
@@ -86,10 +89,12 @@ def _indices_within_arm(
 ) -> List[int]:
     """Return gene-oriented arm indices for genomic positions inside the arm."""
     out: list[int] = []
+
     for pos in positions:
         idx = _genomic_to_coding_index(pos, arm_start, arm_end, gene_strand)
         if idx is not None:
             out.append(idx)
+
     return out
 
 
@@ -112,15 +117,26 @@ def _try_synonymous_change(
     idx: int,
     *,
     anchor: int,
+    codon_choice: str = "gc",
+    codon_usage_lookup: dict[str, float] | None = None,
 ) -> Optional[Tuple[str, Dict]]:
     """
     Try one synonymous nucleotide substitution at `idx`.
+
+    Instead of testing replacement bases in arbitrary order, this chooses among
+    valid synonymous codons using codon_choice:
+
+    - gc:
+        preserve codon GC content as closely as possible
+
+    - usage:
+        preserve codon-usage frequency as closely as possible
 
     Returns
     -------
     (mutated_sequence, mutation_record) or None
     """
-    bases = ["A", "C", "G", "T"]
+    bases = {"A", "C", "G", "T"}
 
     if idx < 0 or idx >= len(coding_seq) or coding_seq[idx] not in bases:
         return None
@@ -131,34 +147,42 @@ def _try_synonymous_change(
     if codon_start < 0 or codon_end > len(coding_seq):
         return None
 
-    codon = list(coding_seq[codon_start:codon_end])
-    aa_orig = _translate_codon("".join(codon))
+    original_codon = coding_seq[codon_start:codon_end].upper()
+    codon_pos = idx - codon_start
 
-    for base in bases:
-        if base == coding_seq[idx]:
-            continue
+    if len(original_codon) != 3 or any(base not in bases for base in original_codon):
+        return None
 
-        codon_mut = codon.copy()
-        codon_mut[idx - codon_start] = base
+    new_codon = choose_synonymous_codon(
+        original_codon,
+        codon_pos,
+        required_new_base=None,
+        mode=codon_choice,
+        usage_lookup=codon_usage_lookup,
+    )
 
-        if _translate_codon("".join(codon_mut)) == aa_orig:
-            seq = list(coding_seq)
-            seq[idx] = base
+    if new_codon is None or new_codon == original_codon:
+        return None
 
-            return (
-                "".join(seq),
-                {
-                    "idx": idx,
-                    "from": coding_seq[idx],
-                    "to": base,
-                    "codon_from": "".join(codon),
-                    "codon_to": "".join(codon_mut),
-                    "codon_start": codon_start,
-                    "anchor": anchor,
-                },
-            )
+    if new_codon[codon_pos] == original_codon[codon_pos]:
+        return None
 
-    return None
+    seq = list(coding_seq)
+    seq[codon_start:codon_end] = list(new_codon)
+
+    return (
+        "".join(seq),
+        {
+            "idx": idx,
+            "from": original_codon[codon_pos],
+            "to": new_codon[codon_pos],
+            "codon_from": original_codon,
+            "codon_to": new_codon,
+            "codon_start": codon_start,
+            "anchor": anchor,
+            "codon_choice": codon_choice,
+        },
+    )
 
 
 def _two_synonymous_changes_near(
@@ -166,23 +190,42 @@ def _two_synonymous_changes_near(
     candidate_indices: List[int],
     *,
     anchor: int,
+    codon_choice: str = "gc",
+    codon_usage_lookup: dict[str, float] | None = None,
 ) -> Optional[Tuple[str, List[Dict]]]:
     """
     Try to apply two synonymous changes using candidate indices in priority order.
 
-    Returns only if two synonymous changes can be made. This is deliberate: outside
-    the highest-value PAM/PAM-proximal positions, we require two blocking edits.
+    Returns only if two synonymous changes can be made. This is deliberate:
+    outside PAM/PAM-proximal positions, two blocking edits are required.
     """
     seq = coding_seq
     muts: list[dict] = []
 
+    used_codons: set[int] = set()
+
     for idx in candidate_indices:
-        attempt = _try_synonymous_change(seq, idx, anchor=anchor)
+        codon_start = _codon_start_for_idx(idx, anchor=anchor)
+
+        # Avoid making two sequential edits to the same codon using stale logic.
+        # This keeps the double-edit strategy simple and predictable.
+        if codon_start in used_codons:
+            continue
+
+        attempt = _try_synonymous_change(
+            seq,
+            idx,
+            anchor=anchor,
+            codon_choice=codon_choice,
+            codon_usage_lookup=codon_usage_lookup,
+        )
+
         if attempt is None:
             continue
 
         seq, rec = attempt
         muts.append(rec)
+        used_codons.add(codon_start)
 
         if len(muts) == 2:
             return seq, muts
@@ -215,6 +258,22 @@ def _fmt_mut_locations(
         items.append(f"{base_from}-{chrom}:{pos}-{base_to}")
 
     return ", ".join(items)
+
+
+def _fmt_mut_positions(
+    arm_start: int,
+    arm_end: int,
+    gene_strand: str,
+    muts: List[Dict],
+) -> str:
+    """Return semicolon-separated genomic mutation positions."""
+    if not muts:
+        return "none"
+
+    return ";".join(
+        str(_coding_index_to_genomic(mut["idx"], arm_start, arm_end, gene_strand))
+        for mut in muts
+    )
 
 
 def _frame_anchor_for_arm(*, feature: str, target_arm: str, arm_len: int) -> int:
@@ -284,22 +343,6 @@ def _guide_spacer_position_to_genomic(
         return protospacer_end - (guide_pos - 1)
 
     raise ValueError("grna_strand must be '+' or '-'")
-
-def _fmt_mut_positions(
-    arm_start: int,
-    arm_end: int,
-    gene_strand: str,
-    muts: List[Dict],
-) -> str:
-    """Return semicolon-separated genomic mutation positions."""
-    if not muts:
-        return "none"
-
-    positions = [
-        str(_coding_index_to_genomic(mut["idx"], arm_start, arm_end, gene_strand))
-        for mut in muts
-    ]
-    return ";".join(positions)
 
 
 def choose_arm_for_mutation(
@@ -508,6 +551,8 @@ def choose_arm_for_mutation(
 def apply_silent_edits(
     gRNA_df: pd.DataFrame,
     *,
+    codon_choice: str = "gc",
+    codon_usage_lookup: dict[str, float] | None = None,
     show_progress: bool = True,
 ) -> pd.DataFrame:
     """
@@ -518,11 +563,18 @@ def apply_silent_edits(
     - HAR_seq_mut
     - HAL_mutation_location
     - HAR_mutation_location
+    - HAL_mutation_positions
+    - HAR_mutation_positions
     - edit_arm
     - blocking_mutation_count
     - blocking_mutation_strategy
     - blocking_mutation_zone
+    - primary_blocking_position
+    - blocking_priority_score
     """
+    if codon_choice not in ("gc", "usage"):
+        raise ValueError("codon_choice must be one of: gc, usage")
+
     df = gRNA_df.copy()
 
     if "warnings" not in df.columns:
@@ -533,14 +585,15 @@ def apply_silent_edits(
         ("HAR_seq_mut", ""),
         ("HAL_mutation_location", "none"),
         ("HAR_mutation_location", "none"),
+        ("HAL_mutation_positions", "none"),
+        ("HAR_mutation_positions", "none"),
         ("edit_arm", "none"),
         ("blocking_mutation_count", 0),
         ("blocking_mutation_strategy", "none"),
         ("blocking_mutation_zone", "none"),
         ("primary_blocking_position", np.nan),
         ("blocking_priority_score", 0.0),
-        ("HAL_mutation_positions", "none"),
-        ("HAR_mutation_positions", "none"),
+        ("codon_choice", codon_choice),
     ]:
         if col not in df.columns:
             df[col] = default
@@ -573,6 +626,8 @@ def apply_silent_edits(
             work.at[idx, "HAL_seq_mut"] = hal_gene
         if isinstance(har_gene, str) and har_gene:
             work.at[idx, "HAR_seq_mut"] = har_gene
+
+        work.at[idx, "codon_choice"] = codon_choice
 
         if bool(rowd.get("rejected", False)):
             continue
@@ -659,7 +714,14 @@ def apply_silent_edits(
                 if arm_idx is None:
                     continue
 
-                attempt = _try_synonymous_change(arm_seq, arm_idx, anchor=anchor)
+                attempt = _try_synonymous_change(
+                    arm_seq,
+                    arm_idx,
+                    anchor=anchor,
+                    codon_choice=codon_choice,
+                    codon_usage_lookup=codon_usage_lookup,
+                )
+
                 if attempt is not None:
                     arm_seq, rec = attempt
                     rec["guide_position"] = 21 + pam_idx
@@ -692,7 +754,14 @@ def apply_silent_edits(
                 if arm_idx is None:
                     continue
 
-                attempt = _try_synonymous_change(arm_seq, arm_idx, anchor=anchor)
+                attempt = _try_synonymous_change(
+                    arm_seq,
+                    arm_idx,
+                    anchor=anchor,
+                    codon_choice=codon_choice,
+                    codon_usage_lookup=codon_usage_lookup,
+                )
+
                 if attempt is not None:
                     arm_seq, rec = attempt
                     rec["guide_position"] = guide_pos
@@ -735,12 +804,13 @@ def apply_silent_edits(
                 arm_seq,
                 distal_arm_indices,
                 anchor=anchor,
+                codon_choice=codon_choice,
+                codon_usage_lookup=codon_usage_lookup,
             )
 
             if attempt is not None:
                 arm_seq, muts = attempt
 
-                # Attach guide-position metadata back to the two chosen mutations.
                 idx_to_guide_pos = dict(zip(distal_arm_indices, distal_guide_positions))
                 for rec in muts:
                     rec["guide_position"] = idx_to_guide_pos.get(rec["idx"], None)
@@ -773,12 +843,26 @@ def apply_silent_edits(
             har_muts,
         )
 
-        n_muts = len(hal_muts) + len(har_muts)
+        work.at[idx, "HAL_mutation_positions"] = _fmt_mut_positions(
+            int(rowd["HALs"]),
+            int(rowd["HALe"]),
+            gene_strand,
+            hal_muts,
+        )
+        work.at[idx, "HAR_mutation_positions"] = _fmt_mut_positions(
+            int(rowd["HARs"]),
+            int(rowd["HARe"]),
+            gene_strand,
+            har_muts,
+        )
+
         all_muts = hal_muts + har_muts
+        n_muts = len(all_muts)
+
         guide_positions = [
-            m.get("guide_position")
-            for m in all_muts
-            if m.get("guide_position") is not None
+            mut.get("guide_position")
+            for mut in all_muts
+            if mut.get("guide_position") is not None
         ]
 
         primary_pos = max(guide_positions) if guide_positions else np.nan
@@ -792,25 +876,11 @@ def apply_silent_edits(
         else:
             priority_score = 0.0
 
-        work.at[idx, "primary_blocking_position"] = primary_pos
-        work.at[idx, "blocking_priority_score"] = priority_score
         work.at[idx, "blocking_mutation_count"] = n_muts
         work.at[idx, "blocking_mutation_strategy"] = mutation_strategy
         work.at[idx, "blocking_mutation_zone"] = mutation_zone
-
-        work.at[idx, "HAL_mutation_positions"] = _fmt_mut_positions(
-            int(rowd["HALs"]),
-            int(rowd["HALe"]),
-            gene_strand,
-            hal_muts,
-        )
-
-        work.at[idx, "HAR_mutation_positions"] = _fmt_mut_positions(
-            int(rowd["HARs"]),
-            int(rowd["HARe"]),
-            gene_strand,
-            har_muts,
-        )
+        work.at[idx, "primary_blocking_position"] = primary_pos
+        work.at[idx, "blocking_priority_score"] = priority_score
 
         if not did_edit:
             work.at[idx, "warnings"] = merge_warn(

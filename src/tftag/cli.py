@@ -78,6 +78,27 @@ def main():
             "Annotate candidate guides against the relevant stock VCF for the chromosome."
         )
     )
+
+    # Codon Table usage
+    ap.add_argument(
+        "--codon-choice",
+        choices=["gc", "usage"],
+        default="gc",
+        help="Synonymous codon choice strategy for blocking edits.",
+    )
+
+    ap.add_argument(
+        "--codon-usage-table",
+        default=None,
+        help="Path to cached codon-usage TSV. Used when --codon-choice usage.",
+    )
+
+    ap.add_argument(
+        "--force-recompute-codon-usage",
+        action="store_true",
+        help="Recompute codon-usage table even if cache exists.",
+    )
+
     # Selection
     ap.add_argument("--selection", choices=["all", "closest", "rs3", "score"], default="all", help="Return all guides, or select one guide per gene per terminus (start/stop)")
     ap.add_argument("--stock-identical-only", action="store_true", help=("Guide selection mode. all keeps all guides; closest, rs3, and score "
@@ -121,6 +142,9 @@ def main():
         check_stock_vcf_compatibility=args.check_stock_vcf_compatibility,
         check_stock_variants=args.check_stock_variants,
         stock_identical_only=args.stock_identical_only,
+        codon_choice=args.codon_choice,
+        codon_usage_table=args.codon_usage_table,
+        force_recompute_codon_usage=args.force_recompute_codon_usage,
     )
     return 0
 

@@ -97,6 +97,9 @@ def make_run_parameters(
     stock_identical_only: bool,
     stock_vcfs: dict[str, str],
     chrom_to_stock: dict[str, str],
+    codon_choice: str = "gc",
+    codon_usage_table: str | None = None,
+    force_recompute_codon_usage: bool = False,
 ) -> dict:
     """
     Collect run parameters for reproducible logging.
@@ -133,6 +136,9 @@ def make_run_parameters(
         "stock_identical_only": stock_identical_only,
         "stock_vcfs": stock_vcfs,
         "chrom_to_stock": chrom_to_stock,
+        "codon_choice": codon_choice,
+        "codon_usage_table": codon_usage_table,
+        "force_recompute_codon_usage": force_recompute_codon_usage,
     }
 
 
@@ -192,6 +198,10 @@ def run_pipeline(
     check_stock_vcf_compatibility: bool = False,
     check_stock_variants: bool = False,
     stock_identical_only: bool = False,
+    codon_choice: str = "gc",
+    codon_usage_table: str | None = None,
+    force_recompute_codon_usage: bool = False,
+    
 ) -> None:
     """
     Run the TFTag design pipeline.
@@ -348,10 +358,33 @@ def run_pipeline(
             return
 
         # ------------------------------------------------------------
-        # Load annotation/database and genome FASTA
+        # Load annotation/database, genome FASTA and codon usage table (if needed)
         # ------------------------------------------------------------
         db = create_gtf_db(gtf_file, gtf_db_path)
         fasta_dict = load_fasta_dict(genome_fasta_path)
+
+        codon_usage_lookup = {}
+
+        if codon_choice == "usage":
+            from .codon_usage import codon_usage_lookup as make_lookup
+            from .codon_usage import get_or_build_codon_usage_table
+
+            cache_path = codon_usage_table or os.path.join(outdir, "codon_usage.tsv")
+
+            codon_usage_df = get_or_build_codon_usage_table(
+                db=db,
+                fasta_dict=fasta_dict,
+                cache_path=cache_path,
+                genes=None,
+                force_recompute=force_recompute_codon_usage,
+                metadata={
+                    "gtf_file": gtf_file,
+                    "genome_fasta_path": genome_fasta_path,
+                },
+                show_progress=True,
+            )
+
+            codon_usage_lookup = make_lookup(codon_usage_df)
 
         genes_list = parse_genes_arg(genes)
         if genes_list is None:
@@ -620,9 +653,12 @@ def run_pipeline(
         if not work.empty:
             work = apply_silent_edits(
                 work,
+                codon_choice=codon_choice,
+                codon_usage_lookup=codon_usage_lookup,
                 show_progress=True,
             )
 
+            # Annotate potential splice-disrupting risk of any edits applied in the previous step.
             work = splicecheck.annotate_edit_splice_risk(
                 work,
                 db,
